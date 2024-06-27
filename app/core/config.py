@@ -241,6 +241,17 @@ class Settings(BaseSettings):
     # 服务器地址，对应 https://github.com/jxxghp/MoviePilot-Server 项目
     MP_SERVER_HOST: str = "https://movie-pilot.org"
 
+    # 新增订阅搜索时间间隔(分钟)
+    NEW_SUBSCRIBE_SEARCH_INTERVAL: Optional[int] = 24 * 60
+    # 下载文件整理时间间隔(分钟)
+    DOWNLOAD_TRANSFER_INTERVAL: Optional[int] = 2 * 60
+    # 壁纸缓存时间间隔(分钟)
+    RANDOM_WALLPAGER_INTERVAL: Optional[int] = 24 * 60
+    # 公共定时服务时间间隔(分钟)
+    PUBLIC_SCHEDULER_JOB_INTERVAL: Optional[int] = 2 * 60
+    # 用户认证检查时间间隔(分钟)
+    USER_AUTH_INTERVAL: Optional[int] = 24 * 60
+
     @validator("SUBSCRIBE_RSS_INTERVAL",
                "COOKIECLOUD_INTERVAL",
                "MEDIASERVER_SYNC_INTERVAL",

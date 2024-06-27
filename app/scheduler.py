@@ -218,7 +218,7 @@ class Scheduler(metaclass=Singleton):
             "interval",
             id="new_subscribe_search",
             name="新增订阅搜索",
-            minutes=5,
+            minutes=int(settings.NEW_SUBSCRIBE_SEARCH_INTERVAL),
             kwargs={
                 'job_id': 'new_subscribe_search'
             }
@@ -288,7 +288,7 @@ class Scheduler(metaclass=Singleton):
                 "interval",
                 id="transfer",
                 name="下载文件整理",
-                minutes=5,
+                minutes=int(settings.DOWNLOAD_TRANSFER_INTERVAL),
                 kwargs={
                     'job_id': 'transfer'
                 }
@@ -300,7 +300,7 @@ class Scheduler(metaclass=Singleton):
             "interval",
             id="random_wallpager",
             name="壁纸缓存",
-            minutes=30,
+            minutes=int(settings.RANDOM_WALLPAGER_INTERVAL),
             next_run_time=datetime.now(pytz.timezone(settings.TZ)) + timedelta(seconds=3),
             kwargs={
                 'job_id': 'random_wallpager'
@@ -313,7 +313,7 @@ class Scheduler(metaclass=Singleton):
             "interval",
             id="scheduler_job",
             name="公共定时服务",
-            minutes=10,
+            minutes=int(settings.PUBLIC_SCHEDULER_JOB_INTERVAL),
             kwargs={
                 'job_id': 'scheduler_job'
             }
@@ -337,7 +337,7 @@ class Scheduler(metaclass=Singleton):
             "interval",
             id="user_auth",
             name="用户认证检查",
-            minutes=10,
+            minutes=int(settings.USER_AUTH_INTERVAL),
             kwargs={
                 'job_id': 'user_auth'
             }
