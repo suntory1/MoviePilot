@@ -169,7 +169,7 @@ class ConfigModel(BaseModel):
     # 下载器临时文件后缀
     DOWNLOAD_TMPEXT: list = Field(default_factory=lambda: ['.!qb', '.part'])
     # 媒体服务器同步间隔（小时）
-    MEDIASERVER_SYNC_INTERVAL: int = 6
+    MEDIASERVER_SYNC_INTERVAL: int = 24
     # 订阅模式
     SUBSCRIBE_MODE: str = "spider"
     # RSS订阅模式刷新时间间隔（分钟）

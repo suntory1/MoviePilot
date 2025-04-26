@@ -106,11 +106,11 @@ class Scheduler(metaclass=Singleton):
                     "func": SubscribeChain().refresh,
                     "running": False,
                 },
-                "subscribe_follow": {
-                    "name": "关注的订阅分享",
-                    "func": SubscribeChain().follow,
-                    "running": False,
-                },
+                # "subscribe_follow": {
+                #     "name": "关注的订阅分享",
+                #     "func": SubscribeChain().follow,
+                #     "running": False,
+                # },
                 "transfer": {
                     "name": "下载文件整理",
                     "func": TransferChain().process,
@@ -202,7 +202,7 @@ class Scheduler(metaclass=Singleton):
                 "interval",
                 id="subscribe_tmdb",
                 name="订阅元数据更新",
-                hours=6,
+                hours=24,
                 kwargs={
                     'job_id': 'subscribe_tmdb'
                 }
@@ -223,7 +223,7 @@ class Scheduler(metaclass=Singleton):
 
             if settings.SUBSCRIBE_MODE == "spider":
                 # 站点首页种子定时刷新模式
-                triggers = TimerUtils.random_scheduler(num_executions=32)
+                triggers = TimerUtils.random_scheduler(num_executions=1)
                 for trigger in triggers:
                     self._scheduler.add_job(
                         self.start,
@@ -239,9 +239,9 @@ class Scheduler(metaclass=Singleton):
                 # RSS订阅模式
                 if not settings.SUBSCRIBE_RSS_INTERVAL \
                         or not str(settings.SUBSCRIBE_RSS_INTERVAL).isdigit():
-                    settings.SUBSCRIBE_RSS_INTERVAL = 30
-                elif int(settings.SUBSCRIBE_RSS_INTERVAL) < 5:
-                    settings.SUBSCRIBE_RSS_INTERVAL = 5
+                    settings.SUBSCRIBE_RSS_INTERVAL = 24 * 60
+                elif int(settings.SUBSCRIBE_RSS_INTERVAL) < 24 * 60:
+                    settings.SUBSCRIBE_RSS_INTERVAL = 24 * 60
                 self._scheduler.add_job(
                     self.start,
                     "interval",
@@ -254,16 +254,16 @@ class Scheduler(metaclass=Singleton):
                 )
 
             # 关注订阅分享（每1小时）
-            self._scheduler.add_job(
-                self.start,
-                "interval",
-                id="subscribe_follow",
-                name="关注的订阅分享",
-                hours=1,
-                kwargs={
-                    'job_id': 'subscribe_follow'
-                }
-            )
+            # self._scheduler.add_job(
+            #     self.start,
+            #     "interval",
+            #     id="subscribe_follow",
+            #     name="关注的订阅分享",
+            #     hours=24,
+            #     kwargs={
+            #         'job_id': 'subscribe_follow'
+            #     }
+            # )
 
             # 下载器文件转移（每5分钟）
             self._scheduler.add_job(
