@@ -44,6 +44,8 @@ def download(
     # 种子信息
     torrentinfo = TorrentInfo()
     torrentinfo.from_dict(torrent_in.dict())
+    # 手动下载始终使用选择的下载器
+    torrentinfo.site_downloader = downloader
     # 上下文
     context = Context(
         meta_info=metainfo,
@@ -51,7 +53,7 @@ def download(
         torrent_info=torrentinfo
     )
     did = DownloadChain().download_single(context=context, username=current_user.name,
-                                          downloader=downloader, save_path=save_path, source="Manual")
+                                          save_path=save_path, source="Manual")
     if not did:
         return schemas.Response(success=False, message="任务添加失败")
     return schemas.Response(success=True, data={
@@ -94,22 +96,22 @@ def add(
 
 @router.get("/start/{hashString}", summary="开始任务", response_model=schemas.Response)
 def start(
-        hashString: str,
+        hashString: str, name: Optional[str] = None,
         _: schemas.TokenPayload = Depends(verify_token)) -> Any:
     """
     开如下载任务
     """
-    ret = DownloadChain().set_downloading(hashString, "start")
+    ret = DownloadChain().set_downloading(hashString, "start", name=name)
     return schemas.Response(success=True if ret else False)
 
 
 @router.get("/stop/{hashString}", summary="暂停任务", response_model=schemas.Response)
-def stop(hashString: str,
+def stop(hashString: str, name: Optional[str] = None,
          _: schemas.TokenPayload = Depends(verify_token)) -> Any:
     """
     暂停下载任务
     """
-    ret = DownloadChain().set_downloading(hashString, "stop")
+    ret = DownloadChain().set_downloading(hashString, "stop", name=name)
     return schemas.Response(success=True if ret else False)
 
 
@@ -125,10 +127,10 @@ def clients(_: schemas.TokenPayload = Depends(verify_token)) -> Any:
 
 
 @router.delete("/{hashString}", summary="删除下载任务", response_model=schemas.Response)
-def delete(hashString: str,
+def delete(hashString: str, name: Optional[str] = None,
            _: schemas.TokenPayload = Depends(verify_token)) -> Any:
     """
     删除下载任务
     """
-    ret = DownloadChain().remove_downloading(hashString)
+    ret = DownloadChain().remove_downloading(hashString, name=name)
     return schemas.Response(success=True if ret else False)

@@ -14,7 +14,7 @@ from app.log import logger
 from app.schemas import MediaType
 from app.utils.http import RequestUtils
 from app.utils.url import UrlUtils
-from schemas import MediaServerItem
+from app.schemas import MediaServerItem
 
 
 class Plex:
@@ -84,7 +84,7 @@ class Plex:
             logger.error(f"Authentication failed: {e}")
         return None
 
-    @cached(maxsize=100, ttl=86400)
+    @cached(maxsize=32, ttl=86400)
     def __get_library_images(self, library_key: str, mtype: int) -> Optional[List[str]]:
         """
         获取媒体服务器最近添加的媒体的图片列表
@@ -788,7 +788,7 @@ class Plex:
 
             # 合并排序
             for hub in hubs:
-                for item in hub.items:
+                for item in hub.items():
                     sub_result.append(item)
             sub_result.sort(key=lambda x: x.addedAt, reverse=True)
 
@@ -890,3 +890,7 @@ class Plex:
         session = Session()
         session.headers = headers
         return session
+
+    def close(self):
+        if self._session:
+            self._session.close()

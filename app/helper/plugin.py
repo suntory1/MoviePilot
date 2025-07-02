@@ -1,12 +1,16 @@
+import importlib
 import json
 import shutil
+import site
+import sys
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set
 
 from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from packaging.version import Version, InvalidVersion
 from pkg_resources import Requirement, working_set
+from requests import Response
 
 from app.core.cache import cached
 from app.core.config import settings
@@ -38,10 +42,33 @@ class PluginHelper(metaclass=Singleton):
                 if self.install_report():
                     self.systemconfig.set(SystemConfigKey.PluginInstallReport, "1")
 
-    @cached(maxsize=1000, ttl=1800)
-    def get_plugins(self, repo_url: str, package_version: Optional[str] = None) -> Optional[Dict[str, dict]]:
+    def get_plugins(self, repo_url: str, package_version: Optional[str] = None,
+                    force: bool = False) -> Optional[Dict[str, dict]]:
         """
         获取Github所有最新插件列表
+        :param repo_url: Github仓库地址
+        :param package_version: 首选插件版本 (如 "v2", "v3")，如果不指定则获取 v1 版本
+        :param force: 是否强制刷新，忽略缓存
+        """
+        # 如果强制刷新，直接调用不带缓存的版本
+        if force:
+            return self._get_plugins_uncached(repo_url, package_version)
+
+        # 正常情况下调用带缓存的版本
+        return self._get_plugins_cached(repo_url, package_version)
+
+    @cached(maxsize=64, ttl=1800)
+    def _get_plugins_cached(self, repo_url: str, package_version: Optional[str] = None) -> Optional[Dict[str, dict]]:
+        """
+        获取Github所有最新插件列表（使用缓存）
+        :param repo_url: Github仓库地址
+        :param package_version: 首选插件版本 (如 "v2", "v3")，如果不指定则获取 v1 版本
+        """
+        return self._get_plugins_uncached(repo_url, package_version)
+
+    def _get_plugins_uncached(self, repo_url: str, package_version: Optional[str] = None) -> Optional[Dict[str, dict]]:
+        """
+        获取Github所有最新插件列表（不使用缓存）
         :param repo_url: Github仓库地址
         :param package_version: 首选插件版本 (如 "v2", "v3")，如果不指定则获取 v1 版本
         """
@@ -59,11 +86,13 @@ class PluginHelper(metaclass=Singleton):
         if res is None:
             return None
         if res:
+            content = res.text
             try:
-                return json.loads(res.text)
+                return json.loads(content)
             except json.JSONDecodeError:
-                logger.error(f"插件包数据解析失败：{res.text}")
-                return None
+                if "404: Not Found" not in content:
+                    logger.warn(f"插件包数据解析失败：{content}")
+                    return None
         return {}
 
     def get_plugin_package_version(self, pid: str, repo_url: str, package_version: Optional[str] = None) -> Optional[str]:
@@ -83,14 +112,11 @@ class PluginHelper(metaclass=Singleton):
             package_version = settings.VERSION_FLAG
 
         # 优先检查指定版本的插件，即 package.v(x).json 文件中是否存在该插件，如果存在，返回该版本号
-        plugins = self.get_plugins(repo_url, package_version)
-        if pid in plugins:
+        if pid in (self.get_plugins(repo_url, package_version) or []):
             return package_version
 
         # 如果指定版本的插件不存在，检查全局 package.json 文件，查看插件是否兼容指定的版本
-        global_plugins = self.get_plugins(repo_url)
-        plugin = global_plugins.get(pid, None)
-
+        plugin = (self.get_plugins(repo_url) or {}).get(pid, None)
         # 检查插件是否明确支持当前指定的版本（如 v2 或 v3），如果支持，返回空字符串表示使用 package.json（v1）
         if plugin and plugin.get(package_version) is True:
             return ""
@@ -291,7 +317,7 @@ class PluginHelper(metaclass=Singleton):
             else:
                 return None, "插件在仓库中不存在或返回数据格式不正确"
         except Exception as e:
-            logger.error(f"插件数据解析失败：{res.text}，{e}")
+            logger.error(f"插件数据解析失败：{e}")
             return None, "插件数据解析失败"
 
     def __download_files(self, pid: str, file_list: List[dict], user_repo: str,
@@ -373,8 +399,7 @@ class PluginHelper(metaclass=Singleton):
             with open(requirements_file_path, "w", encoding="utf-8") as f:
                 f.write(requirements_txt)
 
-            success, message = self.__pip_install_with_fallback(requirements_file_path)
-            return success, message
+            return self.pip_install_with_fallback(requirements_file_path)
 
         return True, ""  # 如果 requirements.txt 为空，视作成功
 
@@ -391,7 +416,7 @@ class PluginHelper(metaclass=Singleton):
         # 检查是否存在 requirements.txt 文件
         if requirements_file.exists():
             logger.info(f"{pid} 存在依赖，开始尝试安装依赖")
-            success, error_message = self.__pip_install_with_fallback(requirements_file)
+            success, error_message = self.pip_install_with_fallback(requirements_file)
             if success:
                 return True, True, ""
             else:
@@ -449,21 +474,24 @@ class PluginHelper(metaclass=Singleton):
             shutil.rmtree(plugin_dir, ignore_errors=True)
 
     @staticmethod
-    def __pip_install_with_fallback(requirements_file: Path) -> Tuple[bool, str]:
+    def pip_install_with_fallback(requirements_file: Path) -> Tuple[bool, str]:
         """
-        使用自动降级策略，PIP 安装依赖，优先级依次为镜像站、代理、直连
+        使用自动降级策略安装依赖，并确保新安装的包可被动态导入
         :param requirements_file: 依赖的 requirements.txt 文件路径
         :return: (是否成功, 错误信息)
         """
+        base_cmd = [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)]
         strategies = []
 
         # 添加策略到列表中
         if settings.PIP_PROXY:
-            strategies.append(("镜像站", ["pip", "install", "-r", str(requirements_file), "-i", settings.PIP_PROXY]))
+            strategies.append(("镜像站", base_cmd + ["-i", settings.PIP_PROXY]))
         if settings.PROXY_HOST:
-            strategies.append(
-                ("代理", ["pip", "install", "-r", str(requirements_file), "--proxy", settings.PROXY_HOST]))
-        strategies.append(("直连", ["pip", "install", "-r", str(requirements_file)]))
+            strategies.append(("代理", base_cmd + ["--proxy", settings.PROXY_HOST]))
+        strategies.append(("直连", base_cmd))
+
+        # 记录当前已安装的包，以便后续刷新
+        before_installation = set(sys.modules.keys())
 
         # 遍历策略进行安装
         for strategy_name, pip_command in strategies:
@@ -471,6 +499,16 @@ class PluginHelper(metaclass=Singleton):
             success, message = SystemUtils.execute_with_subprocess(pip_command)
             if success:
                 logger.debug(f"[PIP] 策略：{strategy_name} 安装依赖成功，输出：{message}")
+                # 安装成功后刷新Python的模块系统
+                importlib.reload(site)
+                # 获取新安装的模块
+                current_modules = set(sys.modules.keys())
+                new_modules = current_modules - before_installation
+                # 重新加载新安装的模块
+                for module in new_modules:
+                    if module in sys.modules:
+                        del sys.modules[module]
+                logger.debug(f"[PIP] 已刷新导入系统，新加载的模块: {new_modules}")
                 return True, message
             else:
                 logger.error(f"[PIP] 策略：{strategy_name} 安装依赖失败，错误信息：{message}")
@@ -481,7 +519,7 @@ class PluginHelper(metaclass=Singleton):
     def __request_with_fallback(url: str,
                                 headers: Optional[dict] = None,
                                 timeout: Optional[int] = 60,
-                                is_api: bool = False) -> Optional[Any]:
+                                is_api: bool = False) -> Optional[Response]:
         """
         使用自动降级策略，请求资源，优先级依次为镜像站、代理、直连
         :param url: 目标URL
@@ -557,7 +595,6 @@ class PluginHelper(metaclass=Singleton):
     def install_dependencies(self, dependencies: List[str]) -> Tuple[bool, str]:
         """
         安装指定的依赖项列表
-
         :param dependencies: 需要安装或更新的依赖项列表
         :return: (success, message)
         """
@@ -572,12 +609,12 @@ class PluginHelper(metaclass=Singleton):
             with open(requirements_temp_file, "w", encoding="utf-8") as f:
                 for dep in dependencies:
                     f.write(dep + "\n")
-
-            # 使用自动降级策略安装依赖
-            success, message = self.__pip_install_with_fallback(requirements_temp_file)
-            # 删除临时文件
-            requirements_temp_file.unlink()
-            return success, message
+            try:
+                # 使用自动降级策略安装依赖
+                return self.pip_install_with_fallback(requirements_temp_file)
+            finally:
+                # 删除临时文件
+                requirements_temp_file.unlink()
         except Exception as e:
             logger.error(f"安装依赖项时发生错误：{e}")
             return False, f"安装依赖项时发生错误：{e}"

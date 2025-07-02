@@ -7,10 +7,7 @@ ENV LANG="C.UTF-8" \
     DISPLAY=:987 \
     PUID=0 \
     PGID=0 \
-    UMASK=000 \
-    PORT=3001 \
-    NGINX_PORT=3000 \
-    MOVIEPILOT_AUTO_UPDATE=release
+    UMASK=000
 WORKDIR "/app"
 RUN apt-get update -y \
     && apt-get upgrade -y \
@@ -84,8 +81,8 @@ RUN cp -f /app/docker/nginx.common.conf /etc/nginx/common.conf \
     && cat /tmp/MoviePilot-Plugins-main/package.json | jq -r 'to_entries[] | select(.value.v2 == true) | .key' | awk '{print tolower($0)}' | \
         while read -r i; do if [ ! -d "/app/app/plugins/$i" ]; then mv "/tmp/MoviePilot-Plugins-main/plugins/$i" "/app/app/plugins/"; else echo "跳过 $i"; fi; done \
     && curl -sL "https://github.com/jxxghp/MoviePilot-Resources/archive/refs/heads/main.zip" | busybox unzip -d /tmp - \
-    && mv -f /tmp/MoviePilot-Resources-main/resources/* /app/app/helper/ \
+    && mv -f /tmp/MoviePilot-Resources-main/resources.v2/* /app/app/helper/ \
     && rm -rf /tmp/*
 EXPOSE 3000
-VOLUME [ "/config" ]
+VOLUME [ "${CONFIG_DIR}" ]
 ENTRYPOINT [ "/entrypoint.sh" ]

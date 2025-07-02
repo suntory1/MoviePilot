@@ -50,15 +50,15 @@ class SubscribeHelper(metaclass=Singleton):
     ]
 
     def __init__(self):
-        self.systemconfig = SystemConfigOper()
+        systemconfig = SystemConfigOper()
         if settings.SUBSCRIBE_STATISTIC_SHARE:
-            if not self.systemconfig.get(SystemConfigKey.SubscribeReport):
+            if not systemconfig.get(SystemConfigKey.SubscribeReport):
                 if self.sub_report():
-                    self.systemconfig.set(SystemConfigKey.SubscribeReport, "1")
+                    systemconfig.set(SystemConfigKey.SubscribeReport, "1")
         self.get_user_uuid()
         self.get_github_user()
 
-    @cached(maxsize=20, ttl=1800)
+    @cached(maxsize=5, ttl=1800)
     def get_statistic(self, stype: str, page: Optional[int] = 1, count: Optional[int] = 30) -> List[dict]:
         """
         获取订阅统计数据

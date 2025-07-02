@@ -131,7 +131,7 @@ class CacheToolsBackend(CacheBackend):
     - 不支持按 `key` 独立隔离 TTL 和 Maxsize，仅支持作用于 region 级别
     """
 
-    def __init__(self, maxsize: Optional[int] = 1000, ttl: Optional[int] = 1800):
+    def __init__(self, maxsize: Optional[int] = 512, ttl: Optional[int] = 1800):
         """
         初始化缓存实例
 
@@ -150,7 +150,7 @@ class CacheToolsBackend(CacheBackend):
         region = self.get_region(region)
         return self._region_caches.get(region)
 
-    def set(self, key: str, value: Any, ttl: Optional[int] = None, 
+    def set(self, key: str, value: Any, ttl: Optional[int] = None,
             region: Optional[str] = DEFAULT_CACHE_REGION, **kwargs) -> None:
         """
         设置缓存值支持每个 key 独立配置 TTL 和 Maxsize
@@ -196,7 +196,7 @@ class CacheToolsBackend(CacheBackend):
             return None
         return region_cache.get(key)
 
-    def delete(self, key: str, region: Optional[str] = DEFAULT_CACHE_REGION) -> None:
+    def delete(self, key: str, region: Optional[str] = DEFAULT_CACHE_REGION):
         """
         删除缓存
 
@@ -205,7 +205,7 @@ class CacheToolsBackend(CacheBackend):
         """
         region_cache = self.__get_region_cache(region)
         if region_cache is None:
-            return None
+            return
         with lock:
             del region_cache[key]
 
@@ -357,7 +357,7 @@ class RedisBackend(CacheBackend):
         region = self.get_region(quote(region))
         return f"{region}:key:{quote(key)}"
 
-    def set(self, key: str, value: Any, ttl: Optional[int] = None, 
+    def set(self, key: str, value: Any, ttl: Optional[int] = None,
             region: Optional[str] = DEFAULT_CACHE_REGION, **kwargs) -> None:
         """
         设置缓存
@@ -454,7 +454,7 @@ class RedisBackend(CacheBackend):
             self.client.close()
 
 
-def get_cache_backend(maxsize: Optional[int] = 1000, ttl: Optional[int] = 1800) -> CacheBackend:
+def get_cache_backend(maxsize: Optional[int] = 512, ttl: Optional[int] = 1800) -> CacheBackend:
     """
     根据配置获取缓存后端实例
 
@@ -482,13 +482,13 @@ def get_cache_backend(maxsize: Optional[int] = 1000, ttl: Optional[int] = 1800) 
     return CacheToolsBackend(maxsize=maxsize, ttl=ttl)
 
 
-def cached(region: Optional[str] = None, maxsize: Optional[int] = 1000, ttl: Optional[int] = 1800,
+def cached(region: Optional[str] = None, maxsize: Optional[int] = 512, ttl: Optional[int] = 1800,
            skip_none: Optional[bool] = True, skip_empty: Optional[bool] = False):
     """
     自定义缓存装饰器，支持为每个 key 动态传递 maxsize 和 ttl
 
     :param region: 缓存的区
-    :param maxsize: 缓存的最大条目数，默认值为 1000
+    :param maxsize: 缓存的最大条目数，默认值为 512
     :param ttl: 缓存的存活时间，单位秒，默认值为 1800
     :param skip_none: 跳过 None 缓存，默认为 True
     :param skip_empty: 跳过空值缓存（如 None, [], {}, "", set()），默认为 False
