@@ -315,21 +315,6 @@ class MediaChain(ChainBase):
             )
         return None
 
-    @staticmethod
-    def is_bluray_folder(fileitem: schemas.FileItem) -> bool:
-        """
-        判断是否为原盘目录
-        """
-        if not fileitem or fileitem.type != "dir":
-            return False
-        # 蓝光原盘目录必备的文件或文件夹
-        required_files = ['BDMV', 'CERTIFICATE']
-        # 检查目录下是否存在所需文件或文件夹
-        for item in StorageChain().list_files(fileitem):
-            if item.name in required_files:
-                return True
-        return False
-
     @eventmanager.register(EventType.MetadataScrape)
     def scrape_metadata_event(self, event: Event):
         """
@@ -370,7 +355,7 @@ class MediaChain(ChainBase):
             else:
                 if file_list:
                     # 如果是BDMV原盘目录，只对根目录进行刮削，不处理子目录
-                    if self.is_bluray_folder(fileitem):
+                    if storagechain.is_bluray_folder(fileitem):
                         logger.info(f"检测到BDMV原盘目录，只对根目录进行刮削：{fileitem.path}")
                         self.scrape_metadata(fileitem=fileitem,
                                              mediainfo=mediainfo,
@@ -563,10 +548,23 @@ class MediaChain(ChainBase):
                     logger.info("电影NFO刮削已关闭，跳过")
             else:
                 # 电影目录
-                if recursive:
-                    # 处理文件
-                    if self.is_bluray_folder(fileitem):
-                        # 原盘目录
+                files = __list_files(_fileitem=fileitem)
+                is_bluray_folder = storagechain.contains_bluray_subdirectories(files)
+                if recursive and not is_bluray_folder:
+                    # 处理非原盘目录内的文件
+                    for file in files:
+                        if file.type == "dir":
+                            # 电影不处理子目录
+                            continue
+                        self.scrape_metadata(fileitem=file,
+                                                mediainfo=mediainfo,
+                                                init_folder=False,
+                                                parent=fileitem,
+                                                overwrite=overwrite)
+                # 生成目录内图片文件
+                if init_folder:
+                    if is_bluray_folder:
+                        # 检查电影NFO开关
                         if scraping_switchs.get('movie_nfo', True):
                             nfo_path = filepath / (filepath.name + ".nfo")
                             if overwrite or not storagechain.get_file_item(storage=fileitem.storage, path=nfo_path):
@@ -581,20 +579,6 @@ class MediaChain(ChainBase):
                                 logger.info(f"已存在nfo文件：{nfo_path}")
                         else:
                             logger.info("电影NFO刮削已关闭，跳过")
-                    else:
-                        # 处理目录内的文件
-                        files = __list_files(_fileitem=fileitem)
-                        for file in files:
-                            if file.type == "dir":
-                                # 电影不处理子目录
-                                continue
-                            self.scrape_metadata(fileitem=file,
-                                                 mediainfo=mediainfo,
-                                                 init_folder=False,
-                                                 parent=fileitem,
-                                                 overwrite=overwrite)
-                # 生成目录内图片文件
-                if init_folder:
                     # 图片
                     image_dict = self.metadata_img(mediainfo=mediainfo)
                     if image_dict:
@@ -618,7 +602,7 @@ class MediaChain(ChainBase):
                                 should_scrape = True  # 未知类型默认刮削
 
                             if should_scrape:
-                                image_path = filepath.with_name(image_name)
+                                image_path = filepath / image_name
                                 if overwrite or not storagechain.get_file_item(storage=fileitem.storage,
                                                                                path=image_path):
                                     # 流式下载图片并直接保存
@@ -681,7 +665,11 @@ class MediaChain(ChainBase):
                 if recursive:
                     files = __list_files(_fileitem=fileitem)
                     for file in files:
-                        if file.type == "dir" and not file.name.lower().startswith("season"):
+                        if (
+                            file.type == "dir"
+                            and file.name not in settings.RENAME_FORMAT_S0_NAMES
+                            and not file.name.lower().startswith("season")
+                        ):
                             # 电视剧不处理非季子目录
                             continue
                         self.scrape_metadata(fileitem=file,
@@ -691,11 +679,19 @@ class MediaChain(ChainBase):
                                              overwrite=overwrite)
                 # 生成目录的nfo和图片
                 if init_folder:
+                    # TODO  目前的刮削是假定电视剧目录结构符合：/剧集根目录/季目录/剧集文件
+                    #       其中季目录应符合`Season 数字`等明确的季命名，不能用季标题
+                    #       例如：/Torchwood (2006)/Miracle Day/Torchwood (2006) S04E01.mkv
+                    #       当刮削到`Miracle Day`目录时，会误判其为剧集根目录
                     # 识别文件夹名称
                     season_meta = MetaInfo(filepath.name)
                     # 当前文件夹为Specials或者SPs时，设置为S0
                     if filepath.name in settings.RENAME_FORMAT_S0_NAMES:
                         season_meta.begin_season = 0
+                    elif season_meta.name and season_meta.begin_season is not None:
+                        # 当前目录含有非季目录的名称，但却有季信息(通常是被辅助识别词指定了)
+                        # 这种情况应该是剧集根目录，不能按季目录刮削，否则会导致`season_poster`的路径错误 详见issue#5373
+                        season_meta.begin_season = None
                     if season_meta.begin_season is not None:
                         # 检查季NFO开关
                         if scraping_switchs.get('season_nfo', True):
@@ -765,7 +761,8 @@ class MediaChain(ChainBase):
                                     else:
                                         logger.info(f"季图片刮削已关闭，跳过：{image_name}")
                     # 判断当前目录是不是剧集根目录
-                    if not season_meta.season:
+                    elif season_meta.name:
+                        # 不含季信息（包括特别季）但含有名称的，可以认为是剧集根目录
                         # 检查电视剧NFO开关
                         if scraping_switchs.get('tv_nfo', True):
                             # 是否已存在

@@ -194,6 +194,8 @@ class SystemConfigKey(Enum):
     FollowSubscribers = "FollowSubscribers"
     # 通知发送时间
     NotificationSendTime = "NotificationSendTime"
+    # AI智能体配置
+    AIAgentConfig = "AIAgentConfig"
     # 通知消息格式模板
     NotificationTemplates = "NotificationTemplates"
     # 刮削开关设置
@@ -263,6 +265,7 @@ class MessageChannel(Enum):
     Wechat = "微信"
     Telegram = "Telegram"
     Slack = "Slack"
+    Discord = "Discord"
     SynologyChat = "SynologyChat"
     VoceChat = "VoceChat"
     Web = "Web"

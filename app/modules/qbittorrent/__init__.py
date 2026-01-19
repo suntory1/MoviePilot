@@ -7,13 +7,12 @@ from torrentool.torrent import Torrent
 from app import schemas
 from app.core.cache import FileCache
 from app.core.config import settings
-from app.core.event import eventmanager, Event
 from app.core.metainfo import MetaInfo
 from app.log import logger
 from app.modules import _ModuleBase, _DownloaderBase
 from app.modules.qbittorrent.qbittorrent import Qbittorrent
 from app.schemas import TransferTorrent, DownloadingTorrent
-from app.schemas.types import TorrentStatus, ModuleType, DownloaderType, SystemConfigKey, EventType
+from app.schemas.types import TorrentStatus, ModuleType, DownloaderType
 from app.utils.string import StringUtils
 
 
@@ -25,20 +24,6 @@ class QbittorrentModule(_ModuleBase, _DownloaderBase[Qbittorrent]):
         """
         super().init_service(service_name=Qbittorrent.__name__.lower(),
                              service_type=Qbittorrent)
-
-    @eventmanager.register(EventType.ConfigChanged)
-    def handle_config_changed(self, event: Event):
-        """
-        处理配置变更事件
-        :param event: 事件对象
-        """
-        if not event:
-            return
-        event_data: schemas.ConfigChangeEventData = event.event_data
-        if event_data.key not in [SystemConfigKey.Downloaders.value]:
-            return
-        logger.info("配置变更，重新加载Qbittorrent模块...")
-        self.init_module()
 
     @staticmethod
     def get_name() -> str:
@@ -139,12 +124,12 @@ class QbittorrentModule(_ModuleBase, _DownloaderBase[Qbittorrent]):
             return None, None, None, "下载内容为空"
 
         # 读取种子的名称
-        torrent, content = __get_torrent_info()
+        torrent_from_file, content = __get_torrent_info()
         # 检查是否为磁力链接
         is_magnet = isinstance(content, str) and content.startswith("magnet:") or isinstance(content,
                                                                                              bytes) and content.startswith(
             b"magnet:")
-        if not torrent and not is_magnet:
+        if not torrent_from_file and not is_magnet:
             return None, None, None, f"添加种子任务失败：无法读取种子文件"
 
         # 获取下载器
@@ -165,7 +150,7 @@ class QbittorrentModule(_ModuleBase, _DownloaderBase[Qbittorrent]):
         # 添加任务
         state = server.add_torrent(
             content=content,
-            download_dir=str(download_dir),
+            download_dir=self.normalize_path(download_dir, downloader),
             is_paused=is_paused,
             tag=tags,
             cookie=cookie,
@@ -185,8 +170,8 @@ class QbittorrentModule(_ModuleBase, _DownloaderBase[Qbittorrent]):
                 try:
                     for torrent in torrents:
                         # 名称与大小相等则认为是同一个种子
-                        if torrent.get("name") == torrent.name \
-                                and torrent.get("total_size") == torrent.total_size:
+                        if torrent.get("name") == getattr(torrent_from_file, 'name', '') \
+                                and torrent.get("total_size") == getattr(torrent_from_file, 'total_size', 0):
                             torrent_hash = torrent.get("hash")
                             torrent_tags = [str(tag).strip() for tag in torrent.get("tags").split(',')]
                             logger.warn(f"下载器中已存在该种子任务：{torrent_hash} - {torrent.get('name')}")

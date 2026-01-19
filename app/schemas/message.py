@@ -14,7 +14,7 @@ class CommingMessage(BaseModel):
     # 用户ID
     userid: Optional[Union[str, int]] = None
     # 用户名称
-    username: Optional[str] = None
+    username: Optional[Union[str, int]] = None
     # 消息渠道
     channel: Optional[MessageChannel] = None
     # 来源（渠道名称）
@@ -40,7 +40,7 @@ class CommingMessage(BaseModel):
         """
         转换为字典
         """
-        items = self.dict()
+        items = self.model_dump()
         for k, v in items.items():
             if isinstance(v, MessageChannel):
                 items[k] = v.value
@@ -70,7 +70,7 @@ class Notification(BaseModel):
     # 用户ID
     userid: Optional[Union[str, int]] = None
     # 用户名称
-    username: Optional[str] = None
+    username: Optional[Union[str, int]] = None
     # 时间
     date: Optional[str] = None
     # 消息方向
@@ -88,7 +88,7 @@ class Notification(BaseModel):
         """
         转换为字典
         """
-        items = self.dict()
+        items = self.model_dump()
         for k, v in items.items():
             if isinstance(v, MessageChannel) \
                     or isinstance(v, NotificationType):
@@ -219,6 +219,22 @@ class ChannelCapabilityManager:
             max_buttons_per_row=3,
             max_button_rows=8,
             max_button_text_length=25,
+            fallback_enabled=True
+        ),
+        MessageChannel.Discord: ChannelCapabilities(
+            channel=MessageChannel.Discord,
+            capabilities={
+                ChannelCapability.INLINE_BUTTONS,
+                ChannelCapability.MESSAGE_EDITING,
+                ChannelCapability.MESSAGE_DELETION,
+                ChannelCapability.CALLBACK_QUERIES,
+                ChannelCapability.RICH_TEXT,
+                ChannelCapability.IMAGES,
+                ChannelCapability.LINKS
+            },
+            max_buttons_per_row=5,
+            max_button_rows=5,
+            max_button_text_length=80,
             fallback_enabled=True
         ),
         MessageChannel.SynologyChat: ChannelCapabilities(

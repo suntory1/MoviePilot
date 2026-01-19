@@ -41,7 +41,7 @@ async def create_user(
     user = await current_user.async_get_by_name(db, name=user_in.name)
     if user:
         return schemas.Response(success=False, message="用户已存在")
-    user_info = user_in.dict()
+    user_info = user_in.model_dump()
     if user_info.get("password"):
         user_info["hashed_password"] = get_password_hash(user_info["password"])
         user_info.pop("password")
@@ -59,7 +59,7 @@ async def update_user(
     """
     更新用户
     """
-    user_info = user_in.dict()
+    user_info = user_in.model_dump()
     if user_info.get("password"):
         # 正则表达式匹配密码包含字母、数字、特殊字符中的至少两项
         pattern = r'^(?![a-zA-Z]+$)(?!\d+$)(?![^\da-zA-Z\s]+$).{6,50}$'
@@ -109,45 +109,6 @@ async def upload_avatar(user_id: int, db: AsyncSession = Depends(get_async_db), 
         "avatar": f"data:image/ico;base64,{file_base64}"
     })
     return schemas.Response(success=True, message=file.filename)
-
-
-@router.post('/otp/generate', summary='生成otp验证uri', response_model=schemas.Response)
-def otp_generate(
-        current_user: User = Depends(get_current_active_user)
-) -> Any:
-    secret, uri = OtpUtils.generate_secret_key(current_user.name)
-    return schemas.Response(success=secret != "", data={'secret': secret, 'uri': uri})
-
-
-@router.post('/otp/judge', summary='判断otp验证是否通过', response_model=schemas.Response)
-async def otp_judge(
-        data: dict,
-        db: AsyncSession = Depends(get_async_db),
-        current_user: User = Depends(get_current_active_user_async)
-) -> Any:
-    uri = data.get("uri")
-    otp_password = data.get("otpPassword")
-    if not OtpUtils.is_legal(uri, otp_password):
-        return schemas.Response(success=False, message="验证码错误")
-    await current_user.async_update_otp_by_name(db, current_user.name, True, OtpUtils.get_secret(uri))
-    return schemas.Response(success=True)
-
-
-@router.post('/otp/disable', summary='关闭当前用户的otp验证', response_model=schemas.Response)
-async def otp_disable(
-        db: AsyncSession = Depends(get_async_db),
-        current_user: User = Depends(get_current_active_user_async)
-) -> Any:
-    await current_user.async_update_otp_by_name(db, current_user.name, False, "")
-    return schemas.Response(success=True)
-
-
-@router.get('/otp/{userid}', summary='判断当前用户是否开启otp验证', response_model=schemas.Response)
-async def otp_enable(userid: str, db: AsyncSession = Depends(get_async_db)) -> Any:
-    user: User = await User.async_get_by_name(db, userid)
-    if not user:
-        return schemas.Response(success=False)
-    return schemas.Response(success=user.is_otp)
 
 
 @router.get("/config/{key}", summary="查询用户配置", response_model=schemas.Response)

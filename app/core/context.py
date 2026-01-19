@@ -95,18 +95,20 @@ class TorrentInfo:
         if upload_volume_factor is None or download_volume_factor is None:
             return "未知"
         free_strs = {
-            "1.0 1.0": "普通",
-            "1.0 0.0": "免费",
-            "2.0 1.0": "2X",
-            "4.0 1.0": "4X",
-            "2.0 0.0": "2X免费",
-            "4.0 0.0": "4X免费",
-            "1.0 0.5": "50%",
-            "2.0 0.5": "2X 50%",
-            "1.0 0.7": "70%",
-            "1.0 0.3": "30%"
+            "1.00 1.00": "普通",
+            "1.00 0.00": "免费",
+            "2.00 1.00": "2X",
+            "4.00 1.00": "4X",
+            "2.00 0.00": "2X免费",
+            "4.00 0.00": "4X免费",
+            "1.00 0.50": "50%",
+            "2.00 0.50": "2X 50%",
+            "1.00 0.70": "70%",
+            "1.00 0.30": "30%",
+            "1.00 0.75": "75%",
+            "1.00 0.25": "25%"
         }
-        return free_strs.get('%.1f %.1f' % (upload_volume_factor, download_volume_factor), "未知")
+        return free_strs.get('%.2f %.2f' % (upload_volume_factor, download_volume_factor), "未知")
 
     @property
     def volume_factor(self):
@@ -250,6 +252,8 @@ class MediaInfo:
     production_countries: list = field(default_factory=list)
     # 语种
     spoken_languages: list = field(default_factory=list)
+    # 所有发行日期
+    release_dates: list = field(default_factory=list)
     # 状态
     status: str = None
     # 标签
@@ -257,7 +261,7 @@ class MediaInfo:
     # 评价数量
     vote_count: int = None
     # 流行度
-    popularity: int = None
+    popularity: float = None
     # 时长
     runtime: int = None
     # 下一集
@@ -433,6 +437,18 @@ class MediaInfo:
             if self.release_date:
                 # 年份
                 self.year = self.release_date[:4]
+            # 所有发行日期
+            self.release_dates = [
+                {
+                    "date": release_date.get("release_date"),
+                    "iso_code": result.get("iso_3166_1"),
+                    "note": release_date.get("note"),
+                    "type": release_date.get("type"),
+                }
+                for result in info.get("release_dates", {}).get("results", [])
+                for release_date in result.get("release_dates", [])
+                if release_date.get("release_date")
+            ]
         else:
             # 电视剧
             self.title = info.get('name')
@@ -463,11 +479,11 @@ class MediaInfo:
                 self.episode_groups = info.pop("episode_groups").get("results") or []
 
         # 海报
-        if info.get('poster_path'):
-            self.poster_path = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{info.get('poster_path')}"
+        if path := info.get('poster_path'):
+            self.poster_path = settings.TMDB_IMAGE_URL(path)
         # 背景
-        if info.get('backdrop_path'):
-            self.backdrop_path = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{info.get('backdrop_path')}"
+        if path := info.get('backdrop_path'):
+            self.backdrop_path = settings.TMDB_IMAGE_URL(path)
         # 导演和演员
         self.directors, self.actors = __directors_actors(info)
         # 别名和译名

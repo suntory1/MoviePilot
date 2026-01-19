@@ -2,11 +2,12 @@ from fastapi import APIRouter
 
 from app.api.endpoints import login, user, webhook, message, site, subscribe, \
     media, douban, search, plugin, tmdb, history, system, download, dashboard, \
-    transfer, mediaserver, bangumi, storage, discover, recommend, workflow, torrent
+    transfer, mediaserver, bangumi, storage, discover, recommend, workflow, torrent, mcp, mfa
 
 api_router = APIRouter()
 api_router.include_router(login.router, prefix="/login", tags=["login"])
 api_router.include_router(user.router, prefix="/user", tags=["user"])
+api_router.include_router(mfa.router, prefix="/mfa", tags=["mfa"])
 api_router.include_router(site.router, prefix="/site", tags=["site"])
 api_router.include_router(message.router, prefix="/message", tags=["message"])
 api_router.include_router(webhook.router, prefix="/webhook", tags=["webhook"])
@@ -28,3 +29,4 @@ api_router.include_router(discover.router, prefix="/discover", tags=["discover"]
 api_router.include_router(recommend.router, prefix="/recommend", tags=["recommend"])
 api_router.include_router(workflow.router, prefix="/workflow", tags=["workflow"])
 api_router.include_router(torrent.router, prefix="/torrent", tags=["torrent"])
+api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])

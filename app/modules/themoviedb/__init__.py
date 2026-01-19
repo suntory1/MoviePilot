@@ -14,7 +14,6 @@ from app.modules.themoviedb.category import CategoryHelper
 from app.modules.themoviedb.scraper import TmdbScraper
 from app.modules.themoviedb.tmdb_cache import TmdbCache
 from app.modules.themoviedb.tmdbapi import TmdbApi
-from app.schemas import MediaPerson
 from app.schemas.types import MediaType, MediaImageType, ModuleType, MediaRecognizeType
 from app.utils.http import RequestUtils
 
@@ -23,6 +22,7 @@ class TheMovieDbModule(_ModuleBase):
     """
     TMDB媒体信息匹配
     """
+    CONFIG_WATCH = {"PROXY_HOST", "TMDB_API_DOMAIN", "TMDB_API_KEY", "TMDB_LOCALE"}
 
     # 元数据缓存
     cache: TmdbCache = None
@@ -38,6 +38,12 @@ class TheMovieDbModule(_ModuleBase):
         self.tmdb = TmdbApi()
         self.category = CategoryHelper()
         self.scraper = TmdbScraper()
+
+    def on_config_changed(self):
+        # 停止模块
+        self.stop()
+        # 初始化模块
+        self.init_module()
 
     @staticmethod
     def get_name() -> str:
@@ -72,7 +78,7 @@ class TheMovieDbModule(_ModuleBase):
         """
         测试模块连接性
         """
-        ret = RequestUtils(proxies=settings.PROXY).get_res(
+        ret = RequestUtils(ua=settings.NORMAL_USER_AGENT, proxies=settings.PROXY).get_res(
             f"https://{settings.TMDB_API_DOMAIN}/3/movie/550?api_key={settings.TMDB_API_KEY}")
         if ret and ret.status_code == 200:
             return True, ""
@@ -635,7 +641,7 @@ class TheMovieDbModule(_ModuleBase):
             return medias
         return []
 
-    def search_persons(self, name: str) -> Optional[List[MediaPerson]]:
+    def search_persons(self, name: str) -> Optional[List[schemas.MediaPerson]]:
         """
         搜索人物信息
         """
@@ -645,10 +651,10 @@ class TheMovieDbModule(_ModuleBase):
             return []
         results = self.tmdb.search_persons(name)
         if results:
-            return [MediaPerson(source='themoviedb', **person) for person in results]
+            return [schemas.MediaPerson(source='themoviedb', **person) for person in results]
         return []
 
-    async def async_search_persons(self, name: str) -> Optional[List[MediaPerson]]:
+    async def async_search_persons(self, name: str) -> Optional[List[schemas.MediaPerson]]:
         """
         异步搜索人物信息
         """
@@ -658,7 +664,7 @@ class TheMovieDbModule(_ModuleBase):
             return []
         results = await self.tmdb.async_search_persons(name)
         if results:
-            return [MediaPerson(source='themoviedb', **person) for person in results]
+            return [schemas.MediaPerson(source='themoviedb', **person) for person in results]
         return []
 
     def search_collections(self, name: str) -> Optional[List[MediaInfo]]:
@@ -861,19 +867,19 @@ class TheMovieDbModule(_ModuleBase):
             backdrops = images.get("backdrops")
             if backdrops:
                 backdrops = sorted(backdrops, key=lambda x: x.get("vote_average"), reverse=True)
-                mediainfo.backdrop_path = backdrops[0].get("file_path")
+                mediainfo.backdrop_path = settings.TMDB_IMAGE_URL(backdrops[0].get("file_path"))
         # 标志
         if not mediainfo.logo_path:
             logos = images.get("logos")
             if logos:
                 logos = sorted(logos, key=lambda x: x.get("vote_average"), reverse=True)
-                mediainfo.logo_path = logos[0].get("file_path")
+                mediainfo.logo_path = settings.TMDB_IMAGE_URL(logos[0].get("file_path"))
         # 海报
         if not mediainfo.poster_path:
             posters = images.get("posters")
             if posters:
                 posters = sorted(posters, key=lambda x: x.get("vote_average"), reverse=True)
-                mediainfo.poster_path = posters[0].get("file_path")
+                mediainfo.poster_path = settings.TMDB_IMAGE_URL(posters[0].get("file_path"))
         return mediainfo
 
     def obtain_images(self, mediainfo: MediaInfo) -> Optional[MediaInfo]:
@@ -951,7 +957,7 @@ class TheMovieDbModule(_ModuleBase):
                 image_path = seasoninfo.get(image_type.value)
 
         if image_path:
-            return f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/{image_prefix}{image_path}"
+            return settings.TMDB_IMAGE_URL(image_path, image_prefix)
         return None
 
     def tmdb_movie_similar(self, tmdbid: int) -> List[MediaInfo]:

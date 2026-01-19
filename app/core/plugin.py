@@ -6,11 +6,11 @@ import importlib.util
 import inspect
 import os
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import threading
 from typing import Any, Dict, List, Optional, Type, Union, Callable, Tuple
 
 from fastapi import HTTPException
@@ -18,9 +18,9 @@ from starlette import status
 from watchfiles import watch
 
 from app import schemas
-from app.core.cache import cached
+from app.core.cache import fresh, async_fresh
 from app.core.config import settings
-from app.core.event import eventmanager, Event
+from app.core.event import eventmanager
 from app.db.plugindata_oper import PluginDataOper
 from app.db.systemconfig_oper import SystemConfigOper
 from app.helper.plugin import PluginHelper
@@ -28,16 +28,16 @@ from app.helper.sites import SitesHelper  # noqa
 from app.log import logger
 from app.schemas.types import EventType, SystemConfigKey
 from app.utils.crypto import RSAUtils
+from app.utils.mixins import ConfigReloadMixin
 from app.utils.object import ObjectUtils
 from app.utils.singleton import Singleton
 from app.utils.string import StringUtils
 from app.utils.system import SystemUtils
 
 
-class PluginManager(metaclass=Singleton):
-    """
-    插件管理器
-    """
+class PluginManager(ConfigReloadMixin, metaclass=Singleton):
+    """插件管理器"""
+    CONFIG_WATCH = {"DEV", "PLUGIN_AUTO_RELOAD"}
 
     def __init__(self):
         # 插件列表
@@ -250,19 +250,11 @@ class PluginManager(metaclass=Singleton):
         """
         return self._plugins
 
-    @eventmanager.register(EventType.ConfigChanged)
-    def handle_config_changed(self, event: Event):
-        """
-        处理配置变更事件
-        :param event: 事件对象
-        """
-        if not event:
-            return
-        event_data: schemas.ConfigChangeEventData = event.event_data
-        if event_data.key not in ['DEV', 'PLUGIN_AUTO_RELOAD']:
-            return
-        logger.info("配置变更，重新加载插件文件修改监测...")
+    def on_config_changed(self):
         self.reload_monitor()
+
+    def get_reload_name(self) -> str:
+        return "插件文件修改监测"
 
     def reload_monitor(self):
         """
@@ -745,6 +737,36 @@ class PluginManager(metaclass=Singleton):
                     logger.error(f"获取插件 {plugin_id} 动作出错：{str(e)}")
         return ret_actions
 
+    def get_plugin_agent_tools(self, pid: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        获取插件智能体工具
+        [{
+            "plugin_id": "插件ID",
+            "plugin_name": "插件名称",
+            "tools": [ToolClass1, ToolClass2, ...]
+        }]
+        """
+        ret_tools = []
+        # 创建字典快照避免并发修改
+        running_plugins_snapshot = dict(self._running_plugins)
+        for plugin_id, plugin in running_plugins_snapshot.items():
+            if pid and pid != plugin_id:
+                continue
+            if hasattr(plugin, "get_agent_tools") and ObjectUtils.check_method(plugin.get_agent_tools):
+                try:
+                    if not plugin.get_state():
+                        continue
+                    tools = plugin.get_agent_tools()
+                    if tools:
+                        ret_tools.append({
+                            "plugin_id": plugin_id,
+                            "plugin_name": plugin.plugin_name,
+                            "tools": tools
+                        })
+                except Exception as e:
+                    logger.error(f"获取插件 {plugin_id} 智能体工具出错：{str(e)}")
+        return ret_tools
+
     @staticmethod
     def get_plugin_remote_entry(plugin_id: str, dist_path: str) -> str:
         """
@@ -915,14 +937,10 @@ class PluginManager(metaclass=Singleton):
         """
         return list(self._running_plugins.keys())
 
-    @cached(maxsize=1, ttl=1800)
     def get_online_plugins(self, force: bool = False) -> List[schemas.Plugin]:
         """
         获取所有在线插件信息
         """
-        if force:
-            self.get_online_plugins.cache_clear()
-
         if not settings.PLUGIN_MARKET:
             return []
 
@@ -1080,7 +1098,8 @@ class PluginManager(metaclass=Singleton):
         # 已安装插件
         installed_apps = SystemConfigOper().get(SystemConfigKey.UserInstalledPlugins) or []
         # 获取在线插件
-        online_plugins = PluginHelper().get_plugins(market, package_version, force)
+        with fresh(force):
+            online_plugins = PluginHelper().get_plugins(market, package_version)
         if online_plugins is None:
             logger.warning(
                 f"获取{package_version if package_version else ''}插件库失败：{market}，请检查 GitHub 网络连接")
@@ -1218,15 +1237,11 @@ class PluginManager(metaclass=Singleton):
 
         return plugin
 
-    @cached(maxsize=1, ttl=1800)
     async def async_get_online_plugins(self, force: bool = False) -> List[schemas.Plugin]:
         """
         异步获取所有在线插件信息
         :param force: 是否强制刷新（忽略缓存）
         """
-        if force:
-            await self.async_get_online_plugins.cache_clear()
-
         if not settings.PLUGIN_MARKET:
             return []
 
@@ -1291,7 +1306,8 @@ class PluginManager(metaclass=Singleton):
         # 已安装插件
         installed_apps = SystemConfigOper().get(SystemConfigKey.UserInstalledPlugins) or []
         # 获取在线插件
-        online_plugins = await PluginHelper().async_get_plugins(market, package_version, force)
+        async with async_fresh(force):
+            online_plugins = await PluginHelper().async_get_plugins(market, package_version)
         if online_plugins is None:
             logger.warning(
                 f"获取{package_version if package_version else ''}插件库失败：{market}，请检查 GitHub 网络连接")

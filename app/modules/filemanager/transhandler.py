@@ -129,9 +129,18 @@ class TransHandler:
                             transfer_type=transfer_type,
                             need_notify=need_notify,
                         )
-                        return self.result.copy()
+                        return self.result.model_copy()
                 else:
                     new_path = target_path / fileitem.name
+                # 在整理目录前先尝试获取原盘大小，避免整理记录出现0字节的情况
+                # TODO 当前只计算STREAM目录内的文件大小，如果需要精确则递归完整目录
+                if stream_fileitem := source_oper.get_item(
+                    Path(fileitem.path) / "BDMV" / "STREAM"
+                ):
+                    fileitem.size = 0
+                    files = source_oper.list(stream_fileitem) or []
+                    for file in files:
+                        fileitem.size += file.size
                 # 整理目录
                 new_diritem, errmsg = self.__transfer_dir(fileitem=fileitem,
                                                           mediainfo=mediainfo,
@@ -147,21 +156,18 @@ class TransHandler:
                                       fileitem=fileitem,
                                       transfer_type=transfer_type,
                                       need_notify=need_notify)
-                    return self.result.copy()
+                    return self.result.model_copy()
 
                 logger.info(f"文件夹 {fileitem.path} 整理成功")
-                # 计算目录下所有文件大小
-                total_size = sum(file.stat().st_size for file in Path(fileitem.path).rglob('*') if file.is_file())
                 # 返回整理后的路径
                 self.__set_result(success=True,
                                   fileitem=fileitem,
                                   target_item=new_diritem,
                                   target_diritem=new_diritem,
-                                  total_size=total_size,
                                   need_scrape=need_scrape,
                                   need_notify=need_notify,
                                   transfer_type=transfer_type)
-                return self.result.copy()
+                return self.result.model_copy()
             else:
                 # 整理单个文件
                 if mediainfo.type == MediaType.TV:
@@ -174,7 +180,7 @@ class TransHandler:
                                           fail_list=[fileitem.path],
                                           transfer_type=transfer_type,
                                           need_notify=need_notify)
-                        return self.result.copy()
+                        return self.result.model_copy()
 
                     # 文件结束季为空
                     in_meta.end_season = None
@@ -210,7 +216,7 @@ class TransHandler:
                             transfer_type=transfer_type,
                             need_notify=need_notify,
                         )
-                        return self.result.copy()
+                        return self.result.model_copy()
                 else:
                     new_file = target_path / fileitem.name
                     folder_path = target_path
@@ -227,7 +233,7 @@ class TransHandler:
                                       fail_list=[fileitem.path],
                                       transfer_type=transfer_type,
                                       need_notify=need_notify)
-                    return self.result.copy()
+                    return self.result.model_copy()
                 # 目标文件
                 target_item = target_oper.get_item(new_file)
                 if target_item:
@@ -258,7 +264,7 @@ class TransHandler:
                                                   fail_list=[fileitem.path],
                                                   transfer_type=transfer_type,
                                                   need_notify=need_notify)
-                                return self.result.copy()
+                                return self.result.model_copy()
                         elif overwrite_mode == 'never':
                             # 存在不覆盖
                             self.__set_result(success=False,
@@ -269,7 +275,7 @@ class TransHandler:
                                               fail_list=[fileitem.path],
                                               transfer_type=transfer_type,
                                               need_notify=need_notify)
-                            return self.result.copy()
+                            return self.result.model_copy()
                         elif overwrite_mode == 'latest':
                             # 仅保留最新版本
                             logger.info(f"当前整理覆盖模式设置为仅保留最新版本，将覆盖：{new_file}")
@@ -296,7 +302,7 @@ class TransHandler:
                                       fail_list=[fileitem.path],
                                       transfer_type=transfer_type,
                                       need_notify=need_notify)
-                    return self.result.copy()
+                    return self.result.model_copy()
 
                 logger.info(f"文件 {fileitem.path} 整理成功")
                 self.__set_result(success=True,
@@ -306,7 +312,7 @@ class TransHandler:
                                   need_scrape=need_scrape,
                                   transfer_type=transfer_type,
                                   need_notify=need_notify)
-                return self.result.copy()
+                return self.result.model_copy()
         finally:
             self.result = None
 
@@ -421,6 +427,9 @@ class TransHandler:
                         return None, f"{fileitem.path} {fileitem.storage} 下载失败"
             elif fileitem.storage == target_storage:
                 # 同一网盘
+                if not source_oper.is_support_transtype(transfer_type):
+                    return None, f"存储 {fileitem.storage} 不支持 {transfer_type} 整理方式"
+
                 if transfer_type == "copy":
                     # 复制文件到新目录
                     target_fileitem = target_oper.get_folder(target_file.parent)
@@ -441,6 +450,11 @@ class TransHandler:
                             return None, f"【{target_storage}】{fileitem.path} 移动文件失败"
                     else:
                         return None, f"【{target_storage}】{target_file.parent} 目录获取失败"
+                elif transfer_type == "link":
+                    if source_oper.link(fileitem, target_file):
+                        return target_oper.get_item(target_file), ""
+                    else:
+                        return None, f"【{target_storage}】{fileitem.path} 创建硬链接失败"
                 else:
                     return None, f"不支持的整理方式：{transfer_type}"
 

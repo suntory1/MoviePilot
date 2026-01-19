@@ -1,12 +1,16 @@
+import asyncio
 import re
+import time
+from datetime import datetime, timedelta
 from typing import Any, Optional, Dict, Union, List
 
+from app.agent import agent_manager
 from app.chain import ChainBase
 from app.chain.download import DownloadChain
 from app.chain.media import MediaChain
 from app.chain.search import SearchChain
 from app.chain.subscribe import SubscribeChain
-from app.core.config import settings
+from app.core.config import settings, global_vars
 from app.core.context import MediaInfo, Context
 from app.core.meta import MetaBase
 from app.db.user_oper import UserOper
@@ -33,6 +37,10 @@ class MessageChain(ChainBase):
     _cache_file = "__user_messages__"
     # 每页数据量
     _page_size: int = 8
+    # 用户会话信息 {userid: (session_id, last_time)}
+    _user_sessions: Dict[Union[str, int], tuple] = {}
+    # 会话超时时间（分钟）
+    _session_timeout_minutes: int = 15
 
     @staticmethod
     def __get_noexits_info(
@@ -156,15 +164,15 @@ class MessageChain(ChainBase):
                 )
             # 处理消息
             if text.startswith('CALLBACK:'):
-                # 处理按钮回调（适配支持回调的渠道）
+                # 处理按钮回调（适配支持回调的渠），优先级最高
                 if ChannelCapabilityManager.supports_callbacks(channel):
                     self._handle_callback(text=text, channel=channel, source=source,
                                           userid=userid, username=username,
                                           original_message_id=original_message_id, original_chat_id=original_chat_id)
                 else:
                     logger.warning(f"渠道 {channel.value} 不支持回调，但收到了回调消息：{text}")
-            elif text.startswith('/'):
-                # 执行命令
+            elif text.startswith('/') and not text.lower().startswith('/ai'):
+                # 执行特定命令命令（但不是/ai）
                 self.eventmanager.send_event(
                     EventType.CommandExcute,
                     {
@@ -174,265 +182,231 @@ class MessageChain(ChainBase):
                         "source": source
                     }
                 )
-            elif text.isdigit():
-                # 用户选择了具体的条目
-                # 缓存
-                cache_data: dict = user_cache.get(userid).copy()
-                # 选择项目
-                if not cache_data \
-                        or not cache_data.get('items') \
-                        or len(cache_data.get('items')) < int(text):
-                    # 发送消息
-                    self.post_message(Notification(channel=channel, source=source, title="输入有误！", userid=userid))
-                    return
-                try:
-                    # 选择的序号
-                    _choice = int(text) + _current_page * self._page_size - 1
-                    # 缓存类型
-                    cache_type: str = cache_data.get('type')
-                    # 缓存列表
-                    cache_list: list = cache_data.get('items').copy()
-                    # 选择
+            elif text.lower().startswith('/ai'):
+                # 用户指定AI智能体消息响应
+                self._handle_ai_message(text=text, channel=channel, source=source,
+                                        userid=userid, username=username)
+            elif settings.AI_AGENT_ENABLE and settings.AI_AGENT_GLOBAL:
+                # 普通消息，全局智能体响应
+                self._handle_ai_message(text=text, channel=channel, source=source,
+                                        userid=userid, username=username)
+            else:
+                # 非智能体普通消息响应
+                if text.isdigit():
+                    # 用户选择了具体的条目
+                    # 缓存
+                    cache_data: dict = user_cache.get(userid)
+                    if not cache_data:
+                        # 发送消息
+                        self.post_message(Notification(channel=channel, source=source, title="输入有误！", userid=userid))
+                        return
+                    cache_data = cache_data.copy()
+                    # 选择项目
+                    if not cache_data.get('items') \
+                            or len(cache_data.get('items')) < int(text):
+                        # 发送消息
+                        self.post_message(Notification(channel=channel, source=source, title="输入有误！", userid=userid))
+                        return
                     try:
-                        if cache_type in ["Search", "ReSearch"]:
-                            # 当前媒体信息
-                            mediainfo: MediaInfo = cache_list[_choice]
-                            _current_media = mediainfo
-                            # 查询缺失的媒体信息
-                            exist_flag, no_exists = DownloadChain().get_no_exists_info(meta=_current_meta,
-                                                                                       mediainfo=_current_media)
-                            if exist_flag and cache_type == "Search":
-                                # 媒体库中已存在
+                        # 选择的序号
+                        _choice = int(text) + _current_page * self._page_size - 1
+                        # 缓存类型
+                        cache_type: str = cache_data.get('type')
+                        # 缓存列表
+                        cache_list: list = cache_data.get('items').copy()
+                        # 选择
+                        try:
+                            if cache_type in ["Search", "ReSearch"]:
+                                # 当前媒体信息
+                                mediainfo: MediaInfo = cache_list[_choice]
+                                _current_media = mediainfo
+                                # 查询缺失的媒体信息
+                                exist_flag, no_exists = DownloadChain().get_no_exists_info(meta=_current_meta,
+                                                                                           mediainfo=_current_media)
+                                if exist_flag and cache_type == "Search":
+                                    # 媒体库中已存在
+                                    self.post_message(
+                                        Notification(channel=channel,
+                                                     source=source,
+                                                     title=f"【{_current_media.title_year}"
+                                                           f"{_current_meta.sea} 媒体库中已存在，如需重新下载请发送：搜索 名称 或 下载 名称】",
+                                                     userid=userid))
+                                    return
+                                elif exist_flag:
+                                    # 没有缺失，但要全量重新搜索和下载
+                                    no_exists = self.__get_noexits_info(_current_meta, _current_media)
+                                # 发送缺失的媒体信息
+                                messages = []
+                                if no_exists and cache_type == "Search":
+                                    # 发送缺失消息
+                                    mediakey = mediainfo.tmdb_id or mediainfo.douban_id
+                                    messages = [
+                                        f"第 {sea} 季缺失 {StringUtils.str_series(no_exist.episodes) if no_exist.episodes else no_exist.total_episode} 集"
+                                        for sea, no_exist in no_exists.get(mediakey).items()]
+                                elif no_exists:
+                                    # 发送总集数的消息
+                                    mediakey = mediainfo.tmdb_id or mediainfo.douban_id
+                                    messages = [
+                                        f"第 {sea} 季总 {no_exist.total_episode} 集"
+                                        for sea, no_exist in no_exists.get(mediakey).items()]
+                                if messages:
+                                    self.post_message(Notification(channel=channel,
+                                                                   source=source,
+                                                                   title=f"{mediainfo.title_year}：\n" + "\n".join(messages),
+                                                                   userid=userid))
+                                # 搜索种子，过滤掉不需要的剧集，以便选择
+                                logger.info(f"开始搜索 {mediainfo.title_year} ...")
                                 self.post_message(
                                     Notification(channel=channel,
                                                  source=source,
-                                                 title=f"【{_current_media.title_year}"
-                                                       f"{_current_meta.sea} 媒体库中已存在，如需重新下载请发送：搜索 名称 或 下载 名称】",
+                                                 title=f"开始搜索 {mediainfo.type.value} {mediainfo.title_year} ...",
                                                  userid=userid))
-                                return
-                            elif exist_flag:
-                                # 没有缺失，但要全量重新搜索和下载
-                                no_exists = self.__get_noexits_info(_current_meta, _current_media)
-                            # 发送缺失的媒体信息
-                            messages = []
-                            if no_exists and cache_type == "Search":
-                                # 发送缺失消息
-                                mediakey = mediainfo.tmdb_id or mediainfo.douban_id
-                                messages = [
-                                    f"第 {sea} 季缺失 {StringUtils.str_series(no_exist.episodes) if no_exist.episodes else no_exist.total_episode} 集"
-                                    for sea, no_exist in no_exists.get(mediakey).items()]
-                            elif no_exists:
-                                # 发送总集数的消息
-                                mediakey = mediainfo.tmdb_id or mediainfo.douban_id
-                                messages = [
-                                    f"第 {sea} 季总 {no_exist.total_episode} 集"
-                                    for sea, no_exist in no_exists.get(mediakey).items()]
-                            if messages:
-                                self.post_message(Notification(channel=channel,
-                                                               source=source,
-                                                               title=f"{mediainfo.title_year}：\n" + "\n".join(messages),
-                                                               userid=userid))
-                            # 搜索种子，过滤掉不需要的剧集，以便选择
-                            logger.info(f"开始搜索 {mediainfo.title_year} ...")
-                            self.post_message(
-                                Notification(channel=channel,
-                                             source=source,
-                                             title=f"开始搜索 {mediainfo.type.value} {mediainfo.title_year} ...",
-                                             userid=userid))
-                            # 开始搜索
-                            contexts = SearchChain().process(mediainfo=mediainfo,
-                                                             no_exists=no_exists)
-                            if not contexts:
-                                # 没有数据
-                                self.post_message(Notification(
-                                    channel=channel,
-                                    source=source,
-                                    title=f"{mediainfo.title}"
-                                          f"{_current_meta.sea} 未搜索到需要的资源！",
-                                    userid=userid))
-                                return
-                            # 搜索结果排序
-                            contexts = TorrentHelper().sort_torrents(contexts)
-                            try:
-                                # 判断是否设置自动下载
-                                auto_download_user = settings.AUTO_DOWNLOAD_USER
-                                # 匹配到自动下载用户
-                                if auto_download_user \
-                                        and (auto_download_user == "all"
-                                             or any(userid == user for user in auto_download_user.split(","))):
-                                    logger.info(f"用户 {userid} 在自动下载用户中，开始自动择优下载 ...")
-                                    # 自动选择下载
-                                    self.__auto_download(channel=channel,
-                                                         source=source,
-                                                         cache_list=contexts,
-                                                         userid=userid,
-                                                         username=username,
-                                                         no_exists=no_exists)
-                                else:
-                                    # 更新缓存
-                                    user_cache[userid] = {
-                                        "type": "Torrent",
-                                        "items": contexts
-                                    }
-                                    _current_page = 0
-                                    # 保存缓存
-                                    self.save_cache(user_cache, self._cache_file)
-                                    # 删除原消息
-                                    if (original_message_id and original_chat_id and
-                                            ChannelCapabilityManager.supports_deletion(channel)):
-                                        self.delete_message(
-                                            channel=channel,
-                                            source=source,
-                                            message_id=original_message_id,
-                                            chat_id=original_chat_id
-                                        )
-                                    # 发送种子数据
-                                    logger.info(f"搜索到 {len(contexts)} 条数据，开始发送选择消息 ...")
-                                    self.__post_torrents_message(channel=channel,
-                                                                 source=source,
-                                                                 title=mediainfo.title,
-                                                                 items=contexts[:self._page_size],
-                                                                 userid=userid,
-                                                                 total=len(contexts))
-                            finally:
-                                contexts.clear()
-                                del contexts
-                        elif cache_type in ["Subscribe", "ReSubscribe"]:
-                            # 订阅或洗版媒体
-                            mediainfo: MediaInfo = cache_list[_choice]
-                            # 洗版标识
-                            best_version = False
-                            # 查询缺失的媒体信息
-                            if cache_type == "Subscribe":
-                                exist_flag, _ = DownloadChain().get_no_exists_info(meta=_current_meta,
-                                                                                   mediainfo=mediainfo)
-                                if exist_flag:
+                                # 开始搜索
+                                contexts = SearchChain().process(mediainfo=mediainfo,
+                                                                 no_exists=no_exists)
+                                if not contexts:
+                                    # 没有数据
                                     self.post_message(Notification(
                                         channel=channel,
                                         source=source,
-                                        title=f"【{mediainfo.title_year}"
-                                              f"{_current_meta.sea} 媒体库中已存在，如需洗版请发送：洗版 XXX】",
+                                        title=f"{mediainfo.title}"
+                                              f"{_current_meta.sea} 未搜索到需要的资源！",
                                         userid=userid))
                                     return
-                            else:
-                                best_version = True
-                            # 转换用户名
-                            mp_name = UserOper().get_name(**{f"{channel.name.lower()}_userid": userid}) if channel else None
-                            # 添加订阅，状态为N
-                            SubscribeChain().add(title=mediainfo.title,
-                                                 year=mediainfo.year,
-                                                 mtype=mediainfo.type,
-                                                 tmdbid=mediainfo.tmdb_id,
-                                                 season=_current_meta.begin_season,
-                                                 channel=channel,
-                                                 source=source,
-                                                 userid=userid,
-                                                 username=mp_name or username,
-                                                 best_version=best_version)
-                        elif cache_type == "Torrent":
-                            if int(text) == 0:
-                                # 自动选择下载，强制下载模式
-                                self.__auto_download(channel=channel,
+                                # 搜索结果排序
+                                contexts = TorrentHelper().sort_torrents(contexts)
+                                try:
+                                    # 判断是否设置自动下载
+                                    auto_download_user = settings.AUTO_DOWNLOAD_USER
+                                    # 匹配到自动下载用户
+                                    if auto_download_user \
+                                            and (auto_download_user == "all"
+                                                 or any(userid == user for user in auto_download_user.split(","))):
+                                        logger.info(f"用户 {userid} 在自动下载用户中，开始自动择优下载 ...")
+                                        # 自动选择下载
+                                        self.__auto_download(channel=channel,
+                                                             source=source,
+                                                             cache_list=contexts,
+                                                             userid=userid,
+                                                             username=username,
+                                                             no_exists=no_exists)
+                                    else:
+                                        # 更新缓存
+                                        user_cache[userid] = {
+                                            "type": "Torrent",
+                                            "items": contexts
+                                        }
+                                        _current_page = 0
+                                        # 保存缓存
+                                        self.save_cache(user_cache, self._cache_file)
+                                        # 删除原消息
+                                        if (original_message_id and original_chat_id and
+                                                ChannelCapabilityManager.supports_deletion(channel)):
+                                            self.delete_message(
+                                                channel=channel,
+                                                source=source,
+                                                message_id=original_message_id,
+                                                chat_id=original_chat_id
+                                            )
+                                        # 发送种子数据
+                                        logger.info(f"搜索到 {len(contexts)} 条数据，开始发送选择消息 ...")
+                                        self.__post_torrents_message(channel=channel,
+                                                                     source=source,
+                                                                     title=mediainfo.title,
+                                                                     items=contexts[:self._page_size],
+                                                                     userid=userid,
+                                                                     total=len(contexts))
+                                finally:
+                                    contexts.clear()
+                                    del contexts
+                            elif cache_type in ["Subscribe", "ReSubscribe"]:
+                                # 订阅或洗版媒体
+                                mediainfo: MediaInfo = cache_list[_choice]
+                                # 洗版标识
+                                best_version = False
+                                # 查询缺失的媒体信息
+                                if cache_type == "Subscribe":
+                                    exist_flag, _ = DownloadChain().get_no_exists_info(meta=_current_meta,
+                                                                                       mediainfo=mediainfo)
+                                    if exist_flag:
+                                        self.post_message(Notification(
+                                            channel=channel,
+                                            source=source,
+                                            title=f"【{mediainfo.title_year}"
+                                                  f"{_current_meta.sea} 媒体库中已存在，如需洗版请发送：洗版 XXX】",
+                                            userid=userid))
+                                        return
+                                else:
+                                    best_version = True
+                                # 转换用户名
+                                mp_name = UserOper().get_name(
+                                    **{f"{channel.name.lower()}_userid": userid}) if channel else None
+                                # 添加订阅，状态为N
+                                SubscribeChain().add(title=mediainfo.title,
+                                                     year=mediainfo.year,
+                                                     mtype=mediainfo.type,
+                                                     tmdbid=mediainfo.tmdb_id,
+                                                     season=_current_meta.begin_season,
+                                                     channel=channel,
                                                      source=source,
-                                                     cache_list=cache_list,
                                                      userid=userid,
-                                                     username=username)
-                            else:
-                                # 下载种子
-                                context: Context = cache_list[_choice]
-                                # 下载
-                                DownloadChain().download_single(context, channel=channel, source=source,
-                                                                userid=userid, username=username)
+                                                     username=mp_name or username,
+                                                     best_version=best_version)
+                            elif cache_type == "Torrent":
+                                if int(text) == 0:
+                                    # 自动选择下载，强制下载模式
+                                    self.__auto_download(channel=channel,
+                                                         source=source,
+                                                         cache_list=cache_list,
+                                                         userid=userid,
+                                                         username=username)
+                                else:
+                                    # 下载种子
+                                    context: Context = cache_list[_choice]
+                                    # 下载
+                                    DownloadChain().download_single(context, channel=channel, source=source,
+                                                                    userid=userid, username=username)
+                        finally:
+                            cache_list.clear()
+                            del cache_list
                     finally:
-                        cache_list.clear()
-                        del cache_list
-                finally:
-                    cache_data.clear()
-                    del cache_data
-            elif text.lower() == "p":
-                # 上一页
-                cache_data: dict = user_cache.get(userid).copy()
-                if not cache_data:
-                    # 没有缓存
-                    self.post_message(Notification(
-                        channel=channel, source=source, title="输入有误！", userid=userid))
-                    return
-                try:
-                    if _current_page == 0:
-                        # 第一页
+                        cache_data.clear()
+                        del cache_data
+                elif text.lower() == "p":
+                    # 上一页
+                    cache_data: dict = user_cache.get(userid)
+                    if not cache_data:
+                        # 没有缓存
                         self.post_message(Notification(
-                            channel=channel, source=source, title="已经是第一页了！", userid=userid))
+                            channel=channel, source=source, title="输入有误！", userid=userid))
                         return
-                    # 减一页
-                    _current_page -= 1
-                    cache_type: str = cache_data.get('type')
-                    # 产生副本，避免修改原值
-                    cache_list: list = cache_data.get('items').copy()
+                    cache_data = cache_data.copy()
                     try:
                         if _current_page == 0:
-                            start = 0
-                            end = self._page_size
-                        else:
-                            start = _current_page * self._page_size
-                            end = start + self._page_size
-                        if cache_type == "Torrent":
-                            # 发送种子数据
-                            self.__post_torrents_message(channel=channel,
-                                                         source=source,
-                                                         title=_current_media.title,
-                                                         items=cache_list[start:end],
-                                                         userid=userid,
-                                                         total=len(cache_list),
-                                                         original_message_id=original_message_id,
-                                                         original_chat_id=original_chat_id)
-                        else:
-                            # 发送媒体数据
-                            self.__post_medias_message(channel=channel,
-                                                       source=source,
-                                                       title=_current_meta.name,
-                                                       items=cache_list[start:end],
-                                                       userid=userid,
-                                                       total=len(cache_list),
-                                                       original_message_id=original_message_id,
-                                                       original_chat_id=original_chat_id)
-                    finally:
-                        cache_list.clear()
-                        del cache_list
-                finally:
-                    cache_data.clear()
-                    del cache_data
-            elif text.lower() == "n":
-                # 下一页
-                cache_data: dict = user_cache.get(userid).copy()
-                if not cache_data:
-                    # 没有缓存
-                    self.post_message(Notification(
-                        channel=channel, source=source, title="输入有误！", userid=userid))
-                    return
-                try:
-                    cache_type: str = cache_data.get('type')
-                    # 产生副本，避免修改原值
-                    cache_list: list = cache_data.get('items').copy()
-                    total = len(cache_list)
-                    # 加一页
-                    cache_list = cache_list[(_current_page + 1) * self._page_size:(_current_page + 2) * self._page_size]
-                    if not cache_list:
-                        # 没有数据
-                        self.post_message(Notification(
-                            channel=channel, source=source, title="已经是最后一页了！", userid=userid))
-                        return
-                    else:
+                            # 第一页
+                            self.post_message(Notification(
+                                channel=channel, source=source, title="已经是第一页了！", userid=userid))
+                            return
+                        # 减一页
+                        _current_page -= 1
+                        cache_type: str = cache_data.get('type')
+                        # 产生副本，避免修改原值
+                        cache_list: list = cache_data.get('items').copy()
                         try:
-                            # 加一页
-                            _current_page += 1
+                            if _current_page == 0:
+                                start = 0
+                                end = self._page_size
+                            else:
+                                start = _current_page * self._page_size
+                                end = start + self._page_size
                             if cache_type == "Torrent":
                                 # 发送种子数据
                                 self.__post_torrents_message(channel=channel,
                                                              source=source,
                                                              title=_current_media.title,
-                                                             items=cache_list,
+                                                             items=cache_list[start:end],
                                                              userid=userid,
-                                                             total=total,
+                                                             total=len(cache_list),
                                                              original_message_id=original_message_id,
                                                              original_chat_id=original_chat_id)
                             else:
@@ -440,93 +414,145 @@ class MessageChain(ChainBase):
                                 self.__post_medias_message(channel=channel,
                                                            source=source,
                                                            title=_current_meta.name,
-                                                           items=cache_list,
+                                                           items=cache_list[start:end],
                                                            userid=userid,
-                                                           total=total,
+                                                           total=len(cache_list),
                                                            original_message_id=original_message_id,
                                                            original_chat_id=original_chat_id)
                         finally:
                             cache_list.clear()
                             del cache_list
-                finally:
-                    cache_data.clear()
-                    del cache_data
-            else:
-                # 搜索或订阅
-                if text.startswith("订阅"):
-                    # 订阅
-                    content = re.sub(r"订阅[:：\s]*", "", text)
-                    action = "Subscribe"
-                elif text.startswith("洗版"):
-                    # 洗版
-                    content = re.sub(r"洗版[:：\s]*", "", text)
-                    action = "ReSubscribe"
-                elif text.startswith("搜索") or text.startswith("下载"):
-                    # 重新搜索/下载
-                    content = re.sub(r"(搜索|下载)[:：\s]*", "", text)
-                    action = "ReSearch"
-                elif text.startswith("#") \
-                        or re.search(r"^请[问帮你]", text) \
-                        or re.search(r"[?？]$", text) \
-                        or StringUtils.count_words(text) > 10 \
-                        or text.find("继续") != -1:
-                    # 聊天
-                    content = text
-                    action = "Chat"
-                elif StringUtils.is_link(text):
-                    # 链接
-                    content = text
-                    action = "Link"
-                else:
-                    # 搜索
-                    content = text
-                    action = "Search"
-
-                if action in ["Search", "ReSearch", "Subscribe", "ReSubscribe"]:
-                    # 搜索
-                    meta, medias = MediaChain().search(content)
-                    # 识别
-                    if not meta.name:
-                        self.post_message(Notification(
-                            channel=channel, source=source, title="无法识别输入内容！", userid=userid))
-                        return
-                    # 开始搜索
-                    if not medias:
-                        self.post_message(Notification(
-                            channel=channel, source=source, title=f"{meta.name} 没有找到对应的媒体信息！", userid=userid))
-                        return
-                    logger.info(f"搜索到 {len(medias)} 条相关媒体信息")
-                    try:
-                        # 记录当前状态
-                        _current_meta = meta
-                        # 保存缓存
-                        user_cache[userid] = {
-                            'type': action,
-                            'items': medias
-                        }
-                        self.save_cache(user_cache, self._cache_file)
-                        _current_page = 0
-                        _current_media = None
-                        # 发送媒体列表
-                        self.__post_medias_message(channel=channel,
-                                                   source=source,
-                                                   title=meta.name,
-                                                   items=medias[:self._page_size],
-                                                   userid=userid, total=len(medias))
                     finally:
-                        medias.clear()
-                        del medias
+                        cache_data.clear()
+                        del cache_data
+                elif text.lower() == "n":
+                    # 下一页
+                    cache_data: dict = user_cache.get(userid)
+                    if not cache_data:
+                        # 没有缓存
+                        self.post_message(Notification(
+                            channel=channel, source=source, title="输入有误！", userid=userid))
+                        return
+                    cache_data = cache_data.copy()
+                    try:
+                        cache_type: str = cache_data.get('type')
+                        # 产生副本，避免修改原值
+                        cache_list: list = cache_data.get('items').copy()
+                        total = len(cache_list)
+                        # 加一页
+                        cache_list = cache_list[(_current_page + 1) * self._page_size:(_current_page + 2) * self._page_size]
+                        if not cache_list:
+                            # 没有数据
+                            self.post_message(Notification(
+                                channel=channel, source=source, title="已经是最后一页了！", userid=userid))
+                            return
+                        else:
+                            try:
+                                # 加一页
+                                _current_page += 1
+                                if cache_type == "Torrent":
+                                    # 发送种子数据
+                                    self.__post_torrents_message(channel=channel,
+                                                                 source=source,
+                                                                 title=_current_media.title,
+                                                                 items=cache_list,
+                                                                 userid=userid,
+                                                                 total=total,
+                                                                 original_message_id=original_message_id,
+                                                                 original_chat_id=original_chat_id)
+                                else:
+                                    # 发送媒体数据
+                                    self.__post_medias_message(channel=channel,
+                                                               source=source,
+                                                               title=_current_meta.name,
+                                                               items=cache_list,
+                                                               userid=userid,
+                                                               total=total,
+                                                               original_message_id=original_message_id,
+                                                               original_chat_id=original_chat_id)
+                            finally:
+                                cache_list.clear()
+                                del cache_list
+                    finally:
+                        cache_data.clear()
+                        del cache_data
                 else:
-                    # 广播事件
-                    self.eventmanager.send_event(
-                        EventType.UserMessage,
-                        {
-                            "text": content,
-                            "userid": userid,
-                            "channel": channel,
-                            "source": source
-                        }
-                    )
+                    # 搜索或订阅
+                    if text.startswith("订阅"):
+                        # 订阅
+                        content = re.sub(r"订阅[:：\s]*", "", text)
+                        action = "Subscribe"
+                    elif text.startswith("洗版"):
+                        # 洗版
+                        content = re.sub(r"洗版[:：\s]*", "", text)
+                        action = "ReSubscribe"
+                    elif text.startswith("搜索") or text.startswith("下载"):
+                        # 重新搜索/下载
+                        content = re.sub(r"(搜索|下载)[:：\s]*", "", text)
+                        action = "ReSearch"
+                    elif text.startswith("#") \
+                            or re.search(r"^请[问帮你]", text) \
+                            or re.search(r"[?？]$", text) \
+                            or StringUtils.count_words(text) > 10 \
+                            or text.find("继续") != -1:
+                        # 聊天
+                        content = text
+                        action = "Chat"
+                    elif StringUtils.is_link(text):
+                        # 链接
+                        content = text
+                        action = "Link"
+                    else:
+                        # 搜索
+                        content = text
+                        action = "Search"
+
+                    if action in ["Search", "ReSearch", "Subscribe", "ReSubscribe"]:
+                        # 搜索
+                        meta, medias = MediaChain().search(content)
+                        # 识别
+                        if not meta.name:
+                            self.post_message(Notification(
+                                channel=channel, source=source, title="无法识别输入内容！", userid=userid))
+                            return
+                        # 开始搜索
+                        if not medias:
+                            self.post_message(Notification(
+                                channel=channel, source=source, title=f"{meta.name} 没有找到对应的媒体信息！",
+                                userid=userid))
+                            return
+                        logger.info(f"搜索到 {len(medias)} 条相关媒体信息")
+                        try:
+                            # 记录当前状态
+                            _current_meta = meta
+                            # 保存缓存
+                            user_cache[userid] = {
+                                'type': action,
+                                'items': medias
+                            }
+                            self.save_cache(user_cache, self._cache_file)
+                            _current_page = 0
+                            _current_media = None
+                            # 发送媒体列表
+                            self.__post_medias_message(channel=channel,
+                                                       source=source,
+                                                       title=meta.name,
+                                                       items=medias[:self._page_size],
+                                                       userid=userid, total=len(medias))
+                        finally:
+                            medias.clear()
+                            del medias
+                    else:
+                        # 广播事件
+                        self.eventmanager.send_event(
+                            EventType.UserMessage,
+                            {
+                                "text": content,
+                                "userid": userid,
+                                "channel": channel,
+                                "source": source
+                            }
+                        )
         finally:
             user_cache.clear()
             del user_cache
@@ -815,3 +841,133 @@ class MessageChain(ChainBase):
                 buttons.append(page_buttons)
 
         return buttons
+
+    @staticmethod
+    def _get_or_create_session_id(userid: Union[str, int]) -> str:
+        """
+        获取或创建会话ID
+        如果用户上次会话在15分钟内，则复用相同的会话ID；否则创建新的会话ID
+        """
+        current_time = datetime.now()
+
+        # 检查用户是否有已存在的会话
+        if userid in MessageChain._user_sessions:
+            session_id, last_time = MessageChain._user_sessions[userid]
+
+            # 计算时间差
+            time_diff = current_time - last_time
+
+            # 如果时间差小于等于15分钟，复用会话ID
+            if time_diff <= timedelta(minutes=MessageChain._session_timeout_minutes):
+                # 更新最后使用时间
+                MessageChain._user_sessions[userid] = (session_id, current_time)
+                logger.info(
+                    f"复用会话ID: {session_id}, 用户: {userid}, 距离上次会话: {time_diff.total_seconds() / 60:.1f}分钟")
+                return session_id
+
+        # 创建新的会话ID
+        new_session_id = f"user_{userid}_{int(time.time())}"
+        MessageChain._user_sessions[userid] = (new_session_id, current_time)
+        logger.info(f"创建新会话ID: {new_session_id}, 用户: {userid}")
+        return new_session_id
+
+    @staticmethod
+    def clear_user_session(userid: Union[str, int]) -> bool:
+        """
+        清除指定用户的会话信息
+        返回是否成功清除
+        """
+        if userid in MessageChain._user_sessions:
+            session_id, _ = MessageChain._user_sessions.pop(userid)
+            logger.info(f"已清除用户 {userid} 的会话: {session_id}")
+            return True
+        return False
+
+    def remote_clear_session(self, channel: MessageChannel, userid: Union[str, int], source: Optional[str] = None):
+        """
+        清除用户会话（远程命令接口）
+        """
+        # 获取并清除会话信息
+        session_id = None
+        if userid in MessageChain._user_sessions:
+            session_id, _ = MessageChain._user_sessions.pop(userid)
+            logger.info(f"已清除用户 {userid} 的会话: {session_id}")
+
+        # 如果有会话ID，同时清除智能体的会话记忆
+        if session_id:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    agent_manager.clear_session(
+                        session_id=session_id,
+                        user_id=str(userid)
+                    ),
+                    global_vars.loop
+                )
+            except Exception as e:
+                logger.warning(f"清除智能体会话记忆失败: {e}")
+
+            self.post_message(Notification(
+                channel=channel,
+                source=source,
+                title="智能体会话已清除，下次将创建新的会话",
+                userid=userid
+            ))
+        else:
+            self.post_message(Notification(
+                channel=channel,
+                source=source,
+                title="您当前没有活跃的智能体会话",
+                userid=userid
+            ))
+
+    def _handle_ai_message(self, text: str, channel: MessageChannel, source: str,
+                           userid: Union[str, int], username: str) -> None:
+        """
+        处理AI智能体消息
+        """
+        try:
+            # 检查AI智能体是否启用
+            if not settings.AI_AGENT_ENABLE:
+                self.post_message(Notification(
+                    channel=channel,
+                    source=source,
+                    userid=userid,
+                    username=username,
+                    title="MoviePilot智能助手未启用，请在系统设置中启用"
+                ))
+                return
+
+            # 提取用户消息
+            if text.lower().startswith("/ai"):
+                user_message = text[3:].strip()  # 移除 "/ai" 前缀（大小写不敏感）
+            else:
+                user_message = text.strip()  # 按原消息处理
+            if not user_message:
+                self.post_message(Notification(
+                    channel=channel,
+                    source=source,
+                    userid=userid,
+                    username=username,
+                    title="请输入您的问题或需求"
+                ))
+                return
+
+            # 生成或复用会话ID
+            session_id = self._get_or_create_session_id(userid)
+
+            # 在事件循环中处理
+            asyncio.run_coroutine_threadsafe(
+                agent_manager.process_message(
+                    session_id=session_id,
+                    user_id=str(userid),
+                    message=user_message,
+                    channel=channel.value if channel else None,
+                    source=source,
+                    username=username
+                ),
+                global_vars.loop
+            )
+
+        except Exception as e:
+            logger.error(f"处理AI智能体消息失败: {e}")
+            self.messagehelper.put(f"AI智能体处理失败: {str(e)}", role="system", title="MoviePilot助手")

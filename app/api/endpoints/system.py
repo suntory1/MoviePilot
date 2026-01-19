@@ -1,24 +1,21 @@
 import asyncio
-import io
 import json
 import re
 from collections import deque
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Union, Annotated
 
 import aiofiles
 import pillow_avif  # noqa 用于自动注册AVIF支持
-from PIL import Image
 from anyio import Path as AsyncPath
 from app.helper.sites import SitesHelper  # noqa  # noqa
 from fastapi import APIRouter, Body, Depends, HTTPException, Header, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app import schemas
+from app.chain.mediaserver import MediaServerChain
 from app.chain.search import SearchChain
 from app.chain.system import SystemChain
-from app.core.cache import AsyncFileCache
 from app.core.config import global_vars, settings
 from app.core.event import eventmanager
 from app.core.metainfo import MetaInfo
@@ -28,12 +25,14 @@ from app.db.models import User
 from app.db.systemconfig_oper import SystemConfigOper
 from app.db.user_oper import get_current_active_superuser, get_current_active_superuser_async, \
     get_current_active_user_async
+from app.helper.llm import LLMHelper
 from app.helper.mediaserver import MediaServerHelper
 from app.helper.message import MessageHelper
 from app.helper.progress import ProgressHelper
 from app.helper.rule import RuleHelper
 from app.helper.subscribe import SubscribeHelper
 from app.helper.system import SystemHelper
+from app.helper.image import ImageHelper
 from app.log import logger
 from app.scheduler import Scheduler
 from app.schemas import ConfigChangeEventData
@@ -49,9 +48,10 @@ router = APIRouter()
 
 async def fetch_image(
         url: str,
-        proxy: bool = False,
+        proxy: Optional[bool] = None,
         use_cache: bool = False,
         if_none_match: Optional[str] = None,
+        cookies: Optional[str | dict] = None,
         allowed_domains: Optional[set[str]] = None) -> Optional[Response]:
     """
     处理图片缓存逻辑，支持HTTP缓存和磁盘缓存
@@ -67,72 +67,24 @@ async def fetch_image(
         logger.warn(f"Blocked unsafe image URL: {url}")
         return None
 
-    # 缓存路径
-    sanitized_path = SecurityUtils.sanitize_url_path(url)
-    cache_path = Path("images") / sanitized_path
-    if not cache_path.suffix:
-        # 没有文件类型，则添加后缀，在恶意文件类型和实际需求下的折衷选择
-        cache_path = cache_path.with_suffix(".jpg")
-
-    # 缓存对像，缓存过期时间为全局图片缓存天数
-    cache_backend = AsyncFileCache(base=settings.CACHE_PATH,
-                                   ttl=settings.GLOBAL_IMAGE_CACHE_DAYS * 24 * 3600)
-
-    if use_cache:
-        content = await cache_backend.get(cache_path.as_posix(), region="images")
-        if content:
-            # 检查 If-None-Match
-            etag = HashUtils.md5(content)
-            headers = RequestUtils.generate_cache_headers(etag, max_age=86400 * 7)
-            if if_none_match == etag:
-                return Response(status_code=304, headers=headers)
-            # 返回缓存图片
-            return Response(
-                content=content,
-                media_type=UrlUtils.get_mime_type(url, "image/jpeg"),
-                headers=headers
-            )
-
-    # 请求远程图片
-    referer = "https://movie.douban.com/" if "doubanio.com" in url else None
-    proxies = settings.PROXY if proxy else None
-    response = await AsyncRequestUtils(ua=settings.NORMAL_USER_AGENT, proxies=proxies, referer=referer,
-                                       accept_type="image/avif,image/webp,image/apng,*/*").get_res(url=url)
-    if not response:
-        logger.warn(f"Failed to fetch image from URL: {url}")
-        return None
-
-    # 验证下载的内容是否为有效图片
-    try:
-        content = response.content
-        Image.open(io.BytesIO(content)).verify()
-    except Exception as e:
-        logger.warn(f"Invalid image format for URL {url}: {e}")
-        return None
-
-    # 获取请求响应头
-    response_headers = response.headers
-    cache_control_header = response_headers.get("Cache-Control", "")
-    cache_directive, max_age = RequestUtils.parse_cache_control(cache_control_header)
-
-    # 保存缓存
-    if use_cache:
-        await cache_backend.set(cache_path.as_posix(), content, region="images")
-        logger.debug(f"Image cached at {cache_path.as_posix()}")
-
-    # 检查 If-None-Match
-    etag = HashUtils.md5(content)
-    if if_none_match == etag:
-        headers = RequestUtils.generate_cache_headers(etag, cache_directive, max_age)
-        return Response(status_code=304, headers=headers)
-
-    # 响应
-    headers = RequestUtils.generate_cache_headers(etag, cache_directive, max_age)
-    return Response(
-        content=content,
-        media_type=response_headers.get("Content-Type") or UrlUtils.get_mime_type(url, "image/jpeg"),
-        headers=headers
+    content = await ImageHelper().async_fetch_image(
+        url=url,
+        proxy=proxy,
+        use_cache=use_cache,
+        cookies=cookies,
     )
+    if content:
+        # 检查 If-None-Match
+        etag = HashUtils.md5(content)
+        headers = RequestUtils.generate_cache_headers(etag, max_age=86400 * 7)
+        if if_none_match == etag:
+            return Response(status_code=304, headers=headers)
+        # 返回缓存图片
+        return Response(
+            content=content,
+            media_type=UrlUtils.get_mime_type(url, "image/jpeg"),
+            headers=headers
+        )
 
 
 @router.get("/img/{proxy}", summary="图片代理")
@@ -140,6 +92,7 @@ async def proxy_img(
         imgurl: str,
         proxy: bool = False,
         cache: bool = False,
+        use_cookies: bool = False,
         if_none_match: Annotated[str | None, Header()] = None,
         _: schemas.TokenPayload = Depends(verify_resource_token)
 ) -> Response:
@@ -150,7 +103,12 @@ async def proxy_img(
     hosts = [config.config.get("host") for config in MediaServerHelper().get_configs().values() if
              config and config.config and config.config.get("host")]
     allowed_domains = set(settings.SECURITY_IMAGE_DOMAINS) | set(hosts)
-    return await fetch_image(url=imgurl, proxy=proxy, use_cache=cache,
+    cookies = (
+        MediaServerChain().get_image_cookies(server=None, image_url=imgurl)
+        if use_cookies
+        else None
+    )
+    return await fetch_image(url=imgurl, proxy=proxy, use_cache=cache, cookies=cookies,
                              if_none_match=if_none_match, allowed_domains=allowed_domains)
 
 
@@ -164,8 +122,7 @@ async def cache_img(
     本地缓存图片文件，支持 HTTP 缓存，如果启用全局图片缓存，则使用磁盘缓存
     """
     # 如果没有启用全局图片缓存，则不使用磁盘缓存
-    proxy = "doubanio.com" not in url
-    return await fetch_image(url=url, proxy=proxy, use_cache=settings.GLOBAL_IMAGE_CACHE,
+    return await fetch_image(url=url, use_cache=settings.GLOBAL_IMAGE_CACHE,
                              if_none_match=if_none_match)
 
 
@@ -173,22 +130,52 @@ async def cache_img(
 def get_global_setting(token: str):
     """
     查询非敏感系统设置（默认鉴权）
+    仅包含登录前UI初始化必需的字段
     """
     if token != "moviepilot":
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    # FIXME: 新增敏感配置项时要在此处添加排除项
-    info = settings.dict(
-        exclude={"SECRET_KEY", "RESOURCE_SECRET_KEY", "API_TOKEN", "TMDB_API_KEY", "TVDB_API_KEY", "FANART_API_KEY",
-                 "COOKIECLOUD_KEY", "COOKIECLOUD_PASSWORD", "GITHUB_TOKEN", "REPO_GITHUB_TOKEN", "U115_APP_ID",
-                 "ALIPAN_APP_ID", "TVDB_V4_API_KEY", "TVDB_V4_API_PIN"}
+    # 白名单模式，仅包含登录前UI初始化必需的字段
+    info = settings.model_dump(
+        include={
+            "TMDB_IMAGE_DOMAIN",
+            "GLOBAL_IMAGE_CACHE",
+            "ADVANCED_MODE",
+        }
     )
+    # 追加版本信息（用于版本检查）
+    info.update({
+        "FRONTEND_VERSION": SystemChain.get_frontend_version(),
+        "BACKEND_VERSION": APP_VERSION
+    })
+    return schemas.Response(success=True,
+                            data=info)
+
+
+@router.get("/global/user", summary="查询用户相关系统设置", response_model=schemas.Response)
+async def get_user_global_setting(_: User = Depends(get_current_active_user_async)):
+    """
+    查询用户相关系统设置（登录后获取）
+    包含业务功能相关的配置和用户权限信息
+    """
+    # 业务功能相关的配置字段
+    info = settings.model_dump(
+        include={
+            "RECOGNIZE_SOURCE",
+            "SEARCH_SOURCE",
+            "AI_RECOMMEND_ENABLED"
+        }
+    )
+    # 智能助手总开关未开启，智能推荐状态强制返回False
+    if not settings.AI_AGENT_ENABLE:
+        info["AI_RECOMMEND_ENABLED"] = False
+
     # 追加用户唯一ID和订阅分享管理权限
     share_admin = SubscribeHelper().is_admin_user()
     info.update({
         "USER_UNIQUE_ID": SubscribeHelper().get_user_uuid(),
         "SUBSCRIBE_SHARE_MANAGE": share_admin,
-        "WORKFLOW_SHARE_MANAGE": share_admin
+        "WORKFLOW_SHARE_MANAGE": share_admin,
     })
     return schemas.Response(success=True,
                             data=info)
@@ -199,7 +186,7 @@ async def get_env_setting(_: User = Depends(get_current_active_user_async)):
     """
     查询系统环境变量，包括当前版本号（仅管理员）
     """
-    info = settings.dict(
+    info = settings.model_dump(
         exclude={"SECRET_KEY", "RESOURCE_SECRET_KEY"}
     )
     info.update({
@@ -234,13 +221,11 @@ async def set_env_setting(env: dict,
         )
 
     if success_updates:
-        for key in success_updates.keys():
-            # 发送配置变更事件
-            await eventmanager.async_send_event(etype=EventType.ConfigChanged, data=ConfigChangeEventData(
-                key=key,
-                value=getattr(settings, key, None),
-                change_type="update"
-            ))
+        # 发送配置变更事件
+        await eventmanager.async_send_event(etype=EventType.ConfigChanged, data=ConfigChangeEventData(
+            key=success_updates.keys(),
+            change_type="update"
+        ))
 
     return schemas.Response(
         success=True,
@@ -323,6 +308,18 @@ async def set_setting(
         return schemas.Response(success=True)
     else:
         return schemas.Response(success=False, message=f"配置项 '{key}' 不存在")
+
+
+@router.get("/llm-models", summary="获取LLM模型列表", response_model=schemas.Response)
+async def get_llm_models(provider: str, api_key: str, base_url: Optional[str] = None, _: User = Depends(get_current_active_user_async)):
+    """
+    获取LLM模型列表
+    """
+    try:
+        models = LLMHelper().get_models(provider, api_key, base_url)
+        return schemas.Response(success=True, data=models)
+    except Exception as e:
+        return schemas.Response(success=False, message=str(e))
 
 
 @router.get("/message", summary="实时消息")

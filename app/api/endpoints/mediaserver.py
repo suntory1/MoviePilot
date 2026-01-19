@@ -79,10 +79,10 @@ def exists(media_in: schemas.MediaInfo,
     """
     # 转化为媒体信息对象
     mediainfo = MediaInfo()
-    mediainfo.from_dict(media_in.dict())
+    mediainfo.from_dict(media_in.model_dump())
     existsinfo: schemas.ExistMediaInfo = MediaServerChain().media_exists(mediainfo=mediainfo)
     if not existsinfo:
-        return []
+        return {}
     if media_in.season:
         return {
             media_in.season: existsinfo.seasons.get(media_in.season) or []
@@ -108,7 +108,7 @@ def not_exists(media_in: schemas.MediaInfo,
         meta.year = media_in.year
     # 转化为媒体信息对象
     mediainfo = MediaInfo()
-    mediainfo.from_dict(media_in.dict())
+    mediainfo.from_dict(media_in.model_dump())
     exist_flag, no_exists = DownloadChain().get_no_exists_info(meta=meta, mediainfo=mediainfo)
     mediakey = mediainfo.tmdb_id or mediainfo.douban_id
     if mediainfo.type == MediaType.MOVIE:
