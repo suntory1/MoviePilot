@@ -55,6 +55,8 @@ class DownloadHistory(Base):
     media_category = Column(String)
     # 剧集组
     episode_group = Column(String)
+    # 自定义识别词（用于整理时应用）
+    custom_words = Column(String)
 
     @classmethod
     @db_query
@@ -102,14 +104,14 @@ class DownloadHistory(Base):
         # TMDBID + 类型
         if tmdbid and mtype:
             # 电视剧某季某集
-            if season and episode:
+            if season is not None and episode:
                 return db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid,
                                                         DownloadHistory.type == mtype,
                                                         DownloadHistory.seasons == season,
                                                         DownloadHistory.episodes == episode).order_by(
                     DownloadHistory.id.desc()).all()
             # 电视剧某季
-            elif season:
+            elif season is not None:
                 return db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid,
                                                         DownloadHistory.type == mtype,
                                                         DownloadHistory.seasons == season).order_by(
@@ -122,14 +124,14 @@ class DownloadHistory(Base):
         # 标题 + 年份
         elif title and year:
             # 电视剧某季某集
-            if season and episode:
+            if season is not None and episode:
                 return db.query(DownloadHistory).filter(DownloadHistory.title == title,
                                                         DownloadHistory.year == year,
                                                         DownloadHistory.seasons == season,
                                                         DownloadHistory.episodes == episode).order_by(
                     DownloadHistory.id.desc()).all()
             # 电视剧某季
-            elif season:
+            elif season is not None:
                 return db.query(DownloadHistory).filter(DownloadHistory.title == title,
                                                         DownloadHistory.year == year,
                                                         DownloadHistory.seasons == season).order_by(
@@ -207,7 +209,7 @@ class DownloadFiles(Base):
     @classmethod
     @db_query
     def get_by_hash(cls, db: Session, download_hash: str, state: Optional[int] = None):
-        if state:
+        if state is not None:
             return db.query(cls).filter(cls.download_hash == download_hash,
                                         cls.state == state).all()
         else:

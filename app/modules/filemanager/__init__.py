@@ -36,7 +36,7 @@ class FileManagerModule(_ModuleBase):
         self._storage_schemas = ModuleHelper.load('app.modules.filemanager.storages',
                                                   filter_func=lambda _, obj: hasattr(obj, 'schema') and obj.schema)
         # 获取存储类型
-        self._support_storages = [storage.schema.value for storage in self._storage_schemas]
+        self._support_storages = [storage.schema.value for storage in self._storage_schemas if storage.schema]
 
     @staticmethod
     def get_name() -> str:
@@ -196,6 +196,16 @@ class FileManagerModule(_ModuleBase):
             logger.error(f"不支持 {storage} 的二维码生成")
             return None
         return storage_oper.generate_qrcode()
+
+    def generate_auth_url(self, storage: str) -> Optional[Tuple[dict, str]]:
+        """
+        生成 OAuth2 授权 URL
+        """
+        storage_oper = self.__get_storage_oper(storage, "generate_auth_url")
+        if not storage_oper:
+            logger.error(f"不支持 {storage} 的 OAuth2 授权")
+            return {}, f"不支持 {storage} 的 OAuth2 授权"
+        return storage_oper.generate_auth_url()
 
     def check_login(self, storage: str, **kwargs) -> Optional[Dict[str, str]]:
         """
@@ -464,7 +474,7 @@ class FileManagerModule(_ModuleBase):
         else:
             # 未找到有效的媒体库目录
             logger.error(
-                f"{mediainfo.type.value} {mediainfo.title_year} 未找到有效的媒体库目录，无法整理文件，源路径：{fileitem.path}")
+                f"{mediainfo.type.value if mediainfo.type else '未知类型'} {mediainfo.title_year} 未找到有效的媒体库目录，无法整理文件，源路径：{fileitem.path}")
             return TransferInfo(success=False,
                                 fileitem=fileitem,
                                 message="未找到有效的媒体库目录")

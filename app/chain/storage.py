@@ -31,6 +31,12 @@ class StorageChain(ChainBase):
         """
         return self.run_module("generate_qrcode", storage=storage)
 
+    def generate_auth_url(self, storage: str) -> Optional[Tuple[dict, str]]:
+        """
+        生成 OAuth2 授权 URL
+        """
+        return self.run_module("generate_auth_url", storage=storage)
+
     def check_login(self, storage: str, **kwargs) -> Optional[Tuple[dict, str]]:
         """
         登录确认
@@ -139,7 +145,11 @@ class StorageChain(ChainBase):
         """
         if not fileitem or fileitem.type != "dir":
             return False
-        return self.contains_bluray_subdirectories(self.list_files(fileitem))
+        if self.get_file_item(storage=fileitem.storage, path=Path(fileitem.path) / "BDMV"):
+            return True
+        if self.get_file_item(storage=fileitem.storage, path=Path(fileitem.path) / "CERTIFICATE"):
+            return True
+        return False
 
     @staticmethod
     def contains_bluray_subdirectories(fileitems: Optional[List[schemas.FileItem]]) -> bool:
@@ -147,10 +157,10 @@ class StorageChain(ChainBase):
         判断是否包含蓝光必备的文件夹
         """
         required_files = ("BDMV", "CERTIFICATE")
-        for item in fileitems or []:
-            if item.type == "dir" and item.name in required_files:
-                return True
-        return False
+        return any(
+            item.type == "dir" and item.name in required_files
+            for item in fileitems or []
+        )
 
     def delete_media_file(self, fileitem: schemas.FileItem, delete_self: bool = True) -> bool:
         """

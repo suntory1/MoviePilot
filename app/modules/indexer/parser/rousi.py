@@ -197,13 +197,13 @@ class RousiSiteUserInfo(SiteParserBase):
                 url=urljoin(self._base_url, "api/messages"),
                 params=params
             )
-            if not res or res.status_code != 200 or not res.text:
+            if not res or res.status_code != 200 or res.json().get("code", -1) != 0:
                 logger.warn(f"{self._site_name} 站点解析消息失败，状态码: {res.status_code if res else '无响应'}")
                 return {
                     "messages": [],
                     "total_pages": 0
                 }
-            return res.json()
+            return res.json().get("data")
         
         # 分页获取所有未读消息
         page = 0
@@ -216,6 +216,7 @@ class RousiSiteUserInfo(SiteParserBase):
             messages.extend(res.get("messages", []))
             page += 1
         
+        self.message_unread = len(messages)
         for messsage in messages:
             head = messsage.get("title")
             date = StringUtils.unify_datetime_str(messsage.get("created_at"))
